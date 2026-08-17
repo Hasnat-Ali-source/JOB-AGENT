@@ -1,0 +1,780 @@
+/* ==========================================================================
+   Message Blank & Transmission Log — the visual world
+   ==========================================================================
+   Ground is message-blank stock, not cream: a cool oat-grey that reads as
+   office form paper rather than book paper. Two ribbons only, black and
+   telegram red, with an olive for released traffic. Records are set in
+   monospace because they are records; chrome is set in the system sans
+   because this is a tool, and Operate surfaces earn familiarity.
+   ========================================================================== */
+
+:root {
+  /* Ribbons and stock */
+  --stock: #e4e2d8;          /* message-blank paper */
+  --stock-2: #edebe3;        /* lighter panel */
+  --blank: #f7f6f1;          /* the blank itself */
+  --ink: #1a1a17;            /* type ribbon, black */
+  --ink-2: #4a4a43;          /* secondary type */
+  --ink-3: #7c7b71;          /* labels, silkscreen grey */
+  --rule: #c3c1b5;           /* ruled hairlines */
+  --rule-strong: #a3a196;
+
+  --red: #b3261e;            /* the second ribbon: queries, holds, stops */
+  --red-wash: #f4e3e1;
+  --olive: #4f6349;          /* released, sent, clear */
+  --olive-wash: #e2e8de;
+  --amber: #9a6b12;          /* attention, not alarm */
+  --amber-wash: #f4ead6;
+
+  /* Structure */
+  --radius: 2px;             /* paper does not have rounded corners */
+  --gap: 1rem;
+  --measure: 68ch;
+
+  --font-chrome: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Helvetica Neue",
+    Arial, sans-serif;
+  --font-record: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  --shadow-blank: 0 1px 0 rgba(26, 26, 23, 0.06), 0 1px 3px rgba(26, 26, 23, 0.08);
+  --focus: 0 0 0 2px var(--stock), 0 0 0 4px var(--ink);
+}
+
+/* The operator's desk after dark. Same ribbons, inverted stock. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --stock: #16161a;
+    --stock-2: #1d1d22;
+    --blank: #222228;
+    --ink: #e8e7e0;
+    --ink-2: #b4b3aa;
+    --ink-3: #85847b;
+    --rule: #35353d;
+    --rule-strong: #4a4a54;
+
+    --red: #e0655c;
+    --red-wash: #3a2422;
+    --olive: #8fae86;
+    --olive-wash: #23301f;
+    --amber: #d3a552;
+    --amber-wash: #34290f;
+
+    --shadow-blank: 0 1px 0 rgba(0, 0, 0, 0.4), 0 2px 6px rgba(0, 0, 0, 0.35);
+    --focus: 0 0 0 2px var(--stock), 0 0 0 4px var(--ink);
+  }
+}
+
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+html { color-scheme: light dark; }
+
+body {
+  margin: 0;
+  background: var(--stock);
+  color: var(--ink);
+  font-family: var(--font-chrome);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+button, input, select, textarea { font: inherit; color: inherit; }
+
+a { color: inherit; text-underline-offset: 2px; }
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+  border-radius: var(--radius);
+}
+
+/* ==========================================================================
+   Silkscreen labels — the small caps printed on a form beside its fields
+   ========================================================================== */
+
+.label {
+  font-family: var(--font-record);
+  font-size: 10px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  display: block;
+}
+
+.record { font-family: var(--font-record); font-variant-numeric: tabular-nums; }
+
+/* ==========================================================================
+   App shell — a masthead over a register
+   ========================================================================== */
+
+.shell { min-height: 100vh; display: flex; flex-direction: column; }
+
+.masthead {
+  border-bottom: 2px solid var(--ink);
+  background: var(--stock-2);
+  padding: 0 clamp(1rem, 3vw, 2rem);
+  position: sticky;
+  top: 0;
+  z-index: 30;
+}
+
+.masthead__row {
+  display: flex;
+  align-items: baseline;
+  gap: 1.25rem;
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 0.9rem 0 0;
+  flex-wrap: wrap;
+}
+
+.wordmark {
+  font-family: var(--font-record);
+  font-size: 13px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.wordmark span { color: var(--red); }
+
+.masthead__meta {
+  margin-left: auto;
+  display: flex;
+  gap: 1.25rem;
+  align-items: baseline;
+  font-family: var(--font-record);
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+.masthead__meta b { color: var(--ink); font-weight: 600; }
+
+/* On a phone the readouts wrap two lines each and swamp the wordmark; keep the
+   two that carry a number and drop the motto. */
+@media (max-width: 640px) {
+  .masthead__meta {
+    margin-left: 0;
+    width: 100%;
+    gap: 1rem;
+    padding-bottom: 0.35rem;
+  }
+  .masthead__meta > :last-child { display: none; }
+}
+
+/* Tabs read as the tabbed dividers of a form book */
+.tabs {
+  display: flex;
+  gap: 2px;
+  max-width: 1440px;
+  margin: 0 auto;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar { display: none; }
+
+.tab {
+  appearance: none;
+  border: 1px solid var(--rule);
+  border-bottom: none;
+  background: transparent;
+  color: var(--ink-3);
+  padding: 0.5rem 0.9rem;
+  font-family: var(--font-record);
+  font-size: 11px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  cursor: pointer;
+  white-space: nowrap;
+  position: relative;
+  top: 1px;
+  transition: color 150ms, background 150ms;
+}
+
+.tab:hover { color: var(--ink); background: color-mix(in srgb, var(--blank) 55%, transparent); }
+
+.tab[aria-current="page"] {
+  background: var(--stock);
+  color: var(--ink);
+  border-color: var(--ink);
+  border-bottom: 2px solid var(--stock);
+  font-weight: 700;
+}
+
+.tab__count {
+  margin-left: 0.45rem;
+  padding: 0.05rem 0.3rem;
+  border-radius: 2px;
+  background: var(--ink);
+  color: var(--stock);
+  font-size: 10px;
+}
+
+.tab__count[data-tone="red"] { background: var(--red); color: #fff; }
+
+.main {
+  flex: 1;
+  padding: clamp(1.25rem, 3vw, 2rem);
+  max-width: 1440px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+/* ==========================================================================
+   The message blank — the product's primary object
+   ========================================================================== */
+
+.blank {
+  background: var(--blank);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-blank);
+  position: relative;
+}
+
+/* The perforation strip down the left edge of tractor-feed stock */
+.blank--feed { padding-left: 18px; }
+.blank--feed::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 18px;
+  border-right: 1px dashed var(--rule);
+  background-image: radial-gradient(circle at 9px 9px, var(--stock) 2.5px, transparent 2.6px);
+  background-size: 18px 18px;
+  background-repeat: repeat-y;
+  opacity: 0.9;
+}
+
+.blank__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid var(--rule);
+  flex-wrap: wrap;
+}
+
+.blank__to { flex: 1; min-width: 12rem; }
+
+.blank__title {
+  font-size: 1.0625rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin: 0.1rem 0 0;
+  line-height: 1.25;
+}
+
+.blank__body { padding: 0.85rem 1rem; }
+
+.blank__foot {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.75rem 1rem;
+  border-top: 1px solid var(--rule);
+  background: color-mix(in srgb, var(--stock-2) 60%, transparent);
+  flex-wrap: wrap;
+}
+
+/* ==========================================================================
+   Ruled field rows — how a form shows what was filled in
+   ========================================================================== */
+
+.fields { border-top: 1px solid var(--rule); }
+
+.field {
+  display: grid;
+  grid-template-columns: minmax(9rem, 15rem) 1fr;
+  gap: 0 1rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--rule);
+  align-items: baseline;
+}
+
+.field__label {
+  font-family: var(--font-record);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+  text-transform: uppercase;
+}
+
+.field__value {
+  font-family: var(--font-record);
+  font-size: 12.5px;
+  word-break: break-word;
+}
+
+/* A value the agent typed in reads as struck by a ribbon, not typeset */
+.field__value--filled { color: var(--ink); }
+.field__value--blank { color: var(--red); }
+
+@media (max-width: 640px) {
+  .field { grid-template-columns: 1fr; gap: 0.1rem; }
+}
+
+/* ==========================================================================
+   Query slips — the questions the agent would not answer
+   ==========================================================================
+   Two distinct kinds, and they must never look alike: a REFUSED question is a
+   deliberate boundary, an UNMAPPED one is a gap in what the agent knew.
+   ========================================================================== */
+
+/* A query slip is a form the operator could not complete, boxed the way a form
+   boxes a field it needs back. The tone is carried by the ruled box, the paper
+   wash and the printed heading — not by a coloured tab down one edge. */
+.slip {
+  border: 1.5px solid var(--rule-strong);
+  border-radius: var(--radius);
+  padding: 0.7rem 0.85rem;
+  background: var(--blank);
+}
+
+.slip + .slip { margin-top: 0.5rem; }
+
+.slip--refused { border-color: var(--red); background: var(--red-wash); }
+.slip--unmapped { border-color: var(--amber); background: var(--amber-wash); }
+
+/* The heading sits on its own ruled line, the way a printed form separates the
+   instruction from the space you write in. */
+.slip__kind {
+  font-family: var(--font-record);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-weight: 700;
+  padding-bottom: 0.3rem;
+}
+.slip--refused .slip__kind { color: var(--red); }
+.slip--unmapped .slip__kind { color: var(--amber); }
+
+.slip > .row:first-child {
+  border-bottom: 1px dashed currentColor;
+  margin-bottom: 0.4rem;
+}
+.slip--refused > .row:first-child { border-bottom-color: color-mix(in srgb, var(--red) 45%, transparent); }
+.slip--unmapped > .row:first-child { border-bottom-color: color-mix(in srgb, var(--amber) 45%, transparent); }
+
+.slip__question { font-weight: 600; margin: 0.15rem 0 0.2rem; }
+.slip__reason { color: var(--ink-2); font-size: 13px; margin: 0; }
+
+.slip__answer { margin-top: 0.55rem; }
+
+/* ==========================================================================
+   Stamps — status marked onto the record, never a rounded pill
+   ========================================================================== */
+
+.stamp {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-family: var(--font-record);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-weight: 700;
+  padding: 0.2rem 0.45rem;
+  border: 1.5px solid currentColor;
+  border-radius: var(--radius);
+  white-space: nowrap;
+}
+
+.stamp[data-tone="red"] { color: var(--red); }
+.stamp[data-tone="olive"] { color: var(--olive); }
+.stamp[data-tone="amber"] { color: var(--amber); }
+.stamp[data-tone="ink"] { color: var(--ink-2); }
+
+/* The big struck stamp used once per blank, angled as if pressed by hand */
+.stamp--struck {
+  font-size: 13px;
+  padding: 0.25rem 0.6rem;
+  border-width: 2px;
+  transform: rotate(-3.5deg);
+  opacity: 0.9;
+}
+
+/* ==========================================================================
+   Buttons — a release lever, a plain action, a quiet one
+   ========================================================================== */
+
+.btn {
+  appearance: none;
+  font-family: var(--font-record);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-weight: 700;
+  padding: 0.55rem 1rem;
+  border: 1.5px solid var(--ink);
+  background: transparent;
+  color: var(--ink);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background 150ms, color 150ms, transform 100ms;
+}
+
+.btn:hover:not(:disabled) { background: var(--ink); color: var(--stock); }
+.btn:active:not(:disabled) { transform: translateY(1px); }
+
+.btn:disabled { opacity: 0.42; cursor: not-allowed; }
+
+.btn--release {
+  background: var(--ink);
+  color: var(--stock);
+  border-color: var(--ink);
+}
+.btn--release:hover:not(:disabled) {
+  background: var(--olive);
+  border-color: var(--olive);
+  color: #fff;
+}
+
+.btn--danger { border-color: var(--red); color: var(--red); }
+.btn--danger:hover:not(:disabled) { background: var(--red); color: #fff; }
+
+.btn--quiet {
+  border-color: transparent;
+  color: var(--ink-3);
+  padding-inline: 0.5rem;
+}
+.btn--quiet:hover:not(:disabled) { background: transparent; color: var(--ink); text-decoration: underline; }
+
+.btn--sm { padding: 0.35rem 0.65rem; font-size: 10px; }
+
+/* ==========================================================================
+   Inputs — ruled fields you write into
+   ========================================================================== */
+
+.input, .textarea, .select {
+  width: 100%;
+  background: var(--blank);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  padding: 0.5rem 0.6rem;
+  font-family: var(--font-record);
+  font-size: 13px;
+  transition: border-color 150ms;
+}
+
+.input:hover, .textarea:hover, .select:hover { border-color: var(--ink-3); }
+.input:focus, .textarea:focus, .select:focus { border-color: var(--ink); }
+
+.textarea { min-height: 5rem; resize: vertical; line-height: 1.5; }
+
+.field-group { margin-bottom: 0.85rem; }
+.field-group .label { margin-bottom: 0.25rem; }
+
+/* ==========================================================================
+   The register — the transmission log, ruled like a ledger
+   ========================================================================== */
+
+.register {
+  width: 100%;
+  /* The detail column carries the agent's own words — the reason it stopped,
+     the question it refused. Squeezed into whatever the fixed columns leave
+     over, it wrapped to one word per line and became unreadable. A floor on
+     the table's width lets the wrapper scroll instead. */
+  min-width: 58rem;
+  border-collapse: collapse;
+  font-family: var(--font-record);
+  font-size: 12px;
+}
+
+.register th {
+  text-align: left;
+  font-size: 10px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  font-weight: 600;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1.5px solid var(--ink);
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  background: var(--stock);
+}
+
+.register td {
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+}
+
+/* Alternating rule shading, the way ledger paper is printed */
+.register tbody tr:nth-child(even) { background: color-mix(in srgb, var(--blank) 55%, transparent); }
+.register tbody tr:hover { background: var(--amber-wash); }
+
+.register td[data-numeric] { text-align: right; font-variant-numeric: tabular-nums; }
+
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  background: var(--blank);
+}
+
+/* ==========================================================================
+   Layout helpers
+   ========================================================================== */
+
+.stack { display: flex; flex-direction: column; gap: var(--gap); }
+.stack--tight { gap: 0.5rem; }
+.row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+.row--end { justify-content: flex-end; }
+.spacer { flex: 1; }
+
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); gap: var(--gap); }
+.grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: var(--gap); }
+
+.section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin: 0 0 0.75rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1.5px solid var(--ink);
+  flex-wrap: wrap;
+}
+
+.section-head h2 {
+  font-size: 0.9375rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  margin: 0;
+}
+
+.section-head p { margin: 0; color: var(--ink-3); font-size: 13px; }
+
+.muted { color: var(--ink-3); }
+.prose { max-width: var(--measure); }
+
+/* ==========================================================================
+   Folds — sections of the form book, kept closed until wanted
+   ========================================================================== */
+
+.fold + .fold { margin-top: -1px; }
+
+.fold__head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.65rem;
+  width: 100%;
+  padding: 0.6rem 0.15rem 0.5rem;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--rule);
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fold--open > .fold__head { border-bottom: 1.5px solid var(--ink); }
+
+.fold__head:hover { color: var(--ink); }
+.fold__head:hover .fold__mark { border-color: var(--ink); }
+
+.fold__head:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+}
+
+/* The sprocket-hole mark that opens a section, sized like a stamp */
+.fold__mark {
+  flex: none;
+  width: 1.05rem;
+  height: 1.05rem;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  font-family: var(--font-record);
+  font-size: 11px;
+  line-height: 1;
+  color: var(--ink-2);
+  transition: border-color 150ms ease, color 150ms ease;
+}
+
+.fold__title {
+  font-size: 0.9375rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.fold__summary {
+  font-family: var(--font-record);
+  font-size: 12px;
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+
+.fold__body { padding: 0.9rem 0 0.25rem; }
+
+@media (max-width: 640px) {
+  .fold__head { flex-wrap: wrap; }
+}
+
+/* ==========================================================================
+   Counters — the readouts across the top of the operator's desk
+   ========================================================================== */
+
+.counter {
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  background: var(--blank);
+  padding: 0.7rem 0.85rem;
+}
+
+.counter__value {
+  font-family: var(--font-record);
+  font-size: 1.75rem;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.counter__value[data-tone="red"] { color: var(--red); }
+.counter__value[data-tone="olive"] { color: var(--olive); }
+
+.counter__label { margin-top: 0.3rem; }
+
+/* ==========================================================================
+   Empty states — a blank form is an invitation, and says what to do
+   ========================================================================== */
+
+.empty {
+  border: 1px dashed var(--rule-strong);
+  border-radius: var(--radius);
+  padding: 2.25rem 1.5rem;
+  text-align: center;
+  background: color-mix(in srgb, var(--blank) 45%, transparent);
+}
+
+.empty__mark {
+  font-family: var(--font-record);
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  border: 1.5px solid var(--rule-strong);
+  border-radius: var(--radius);
+  padding: 0.25rem 0.6rem;
+  display: inline-block;
+  transform: rotate(-2deg);
+}
+
+.empty h3 { margin: 0.9rem 0 0.3rem; font-size: 1rem; }
+.empty p { margin: 0 auto; max-width: 44ch; color: var(--ink-2); }
+.empty .row { justify-content: center; margin-top: 1rem; }
+
+/* ==========================================================================
+   Notices
+   ========================================================================== */
+
+/* A notice is a printed remark in the margin of the form: ruled all round,
+   washed in its tone, no coloured tab. */
+.notice {
+  border: 1.5px solid currentColor;
+  border-radius: var(--radius);
+  padding: 0.65rem 0.8rem;
+  font-size: 13px;
+}
+
+.notice[data-tone="red"] { color: var(--red); background: var(--red-wash); }
+.notice[data-tone="amber"] { color: var(--amber); background: var(--amber-wash); }
+.notice[data-tone="olive"] { color: var(--olive); background: var(--olive-wash); }
+
+.notice strong { display: block; margin-bottom: 0.15rem; }
+.notice > div { color: var(--ink-2); }
+
+/* ==========================================================================
+   Toast — transmission receipts, bottom right of the desk
+   ========================================================================== */
+
+.toasts {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-width: min(26rem, calc(100vw - 2rem));
+}
+
+.toast {
+  background: var(--blank);
+  border: 1px solid var(--ink);
+  border-top-width: 3px;
+  border-radius: var(--radius);
+  padding: 0.6rem 0.8rem;
+  box-shadow: var(--shadow-blank);
+  font-size: 13px;
+  animation: slip-in 180ms ease-out;
+}
+
+/* The receipt's tone reads off the torn top edge, where the paper left the
+   machine. */
+.toast[data-tone="red"] { border-top-color: var(--red); }
+.toast[data-tone="olive"] { border-top-color: var(--olive); }
+
+@keyframes slip-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ==========================================================================
+   Loading — a skeleton of the blank, not a spinner
+   ========================================================================== */
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--rule) 25%,
+    color-mix(in srgb, var(--rule) 45%, transparent) 50%,
+    var(--rule) 75%
+  );
+  background-size: 200% 100%;
+  animation: pull 1.4s linear infinite;
+  border-radius: var(--radius);
+  height: 0.85rem;
+}
+
+@keyframes pull {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ==========================================================================
+   Detail disclosure
+   ========================================================================== */
+
+details.fold { border-top: 1px solid var(--rule); padding-top: 0.5rem; margin-top: 0.5rem; }
+
+details.fold > summary {
+  cursor: pointer;
+  font-family: var(--font-record);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  list-style: none;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: "▸ "; }
+details.fold[open] > summary::before { content: "▾ "; }
+details.fold > summary:hover { color: var(--ink); }
+
+.fold__body { padding-top: 0.6rem; }

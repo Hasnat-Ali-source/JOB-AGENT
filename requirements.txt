@@ -1,0 +1,74 @@
+# Job Agent dependencies
+#
+# Requires Python 3.11+ (verified on 3.14.6).
+# Every pin below was installed and imported on Python 3.14 — the previous
+# pinned set (pydantic 2.5.0, sqlmodel 0.0.14, lxml 4.9.3, ...) predates 3.14
+# and fails to build against it.
+#
+#   python3 -m venv .venv
+#   .venv/bin/pip install -r requirements.txt
+#   .venv/bin/playwright install chromium firefox
+#
+# Dev/optional extras live in requirements-dev.txt.
+
+# --- Async & web framework -------------------------------------------------
+fastapi==0.141.1
+uvicorn[standard]==0.52.3
+pydantic==2.13.4
+pydantic-settings==2.15.0
+python-multipart==0.0.32  # Required by FastAPI for file uploads
+
+# --- Database & ORM --------------------------------------------------------
+sqlalchemy==2.0.52
+sqlmodel==0.0.39
+alembic==1.19.1
+
+# --- Browser automation ----------------------------------------------------
+playwright==1.62.0
+
+# --- Security & secrets ----------------------------------------------------
+keyring==25.7.0
+cryptography==50.0.0
+
+# --- Fuzzy matching & dedup (Phase 3) --------------------------------------
+rapidfuzz==3.14.5
+
+# --- Web scraping utilities ------------------------------------------------
+# Connectors parse JSON-LD/DOM through Playwright today; these back the
+# offline HTML parsing paths.
+beautifulsoup4==4.15.0
+lxml==6.1.1
+html5lib==1.1
+
+# --- HTTP & API clients ----------------------------------------------------
+httpx==0.28.1
+aiohttp==3.14.3
+
+# --- Logging & config ------------------------------------------------------
+python-json-logger==4.1.0
+python-dotenv==1.2.2
+
+# --- CLI & utilities -------------------------------------------------------
+click==8.4.2
+rich==15.0.0
+python-dateutil==2.9.0.post0
+pytz==2026.3.post1
+
+# --- Document generation (Phase 4) -----------------------------------------
+python-docx==1.2.0  # Read/write .docx masters
+pypdf==6.16.1       # Extract text from .pdf masters
+
+# Two PDF engines. weasyprint (HTML/CSS layout) is preferred and needs system
+# libraries:  brew install pango cairo gdk-pixbuf libffi
+# reportlab is the pure-Python fallback, selected automatically wherever
+# weasyprint cannot load, so PDF export never depends on the environment.
+weasyprint==69.0
+reportlab==5.0.0
+
+# --- LLM fit scoring (Phase 4) ---------------------------------------------
+ollama==0.6.2  # Local LLM via Ollama HTTP API (default)
+# anthropic==0.122.0  # Uncomment to use the Claude API instead
+
+# --- macOS-specific --------------------------------------------------------
+# PyObjC is generally pre-installed on macOS; listed for completeness:
+# pyobjc==12.1

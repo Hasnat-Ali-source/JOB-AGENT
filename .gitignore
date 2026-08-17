@@ -1,0 +1,97 @@
+# .gitignore for Job Agent project
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDE & editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.env
+.env.local
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+job_agent.db
+jobs.db
+
+# Playwright & browser profiles
+profiles/
+.playwright/
+browser_cache/
+
+# Logs
+*.log
+logs/
+debug-logs/
+
+# Documents & exports
+*.pdf
+generated_resumes/
+generated_cover_letters/
+exports/
+
+# Keychain & sensitive data
+.keychain/
+credentials/
+secrets/
+
+# Screenshots
+screenshots/
+form_snapshots/
+
+# Test outputs
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Build outputs
+dist/
+build/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# launchd
+*.plist
+
+# Node (if frontend included)
+node_modules/
+package-lock.json
+yarn.lock
