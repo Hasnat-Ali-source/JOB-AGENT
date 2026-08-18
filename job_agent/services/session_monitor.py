@@ -61,6 +61,11 @@ class PlatformHealth:
     pending_jobs: int = 0
     search_url: Optional[str] = None
     is_custom: bool = False
+    # Whether the user said this station has to be signed into. Surfaced so
+    # the card can offer to change it: the wrong answer here leaves a public
+    # board permanently "needs_signin", with a Reconnect button that cannot
+    # help.
+    requires_signin: bool = False
     needs_search_url: bool = False
     daily_search_limit: int = 0
     daily_apply_limit: int = 0
@@ -79,6 +84,7 @@ class PlatformHealth:
             "pending_jobs": self.pending_jobs,
             "search_url": self.search_url,
             "is_custom": self.is_custom,
+            "requires_signin": self.requires_signin,
             "needs_search_url": self.needs_search_url,
             "daily_search_limit": self.daily_search_limit,
             "daily_apply_limit": self.daily_apply_limit,
@@ -148,6 +154,7 @@ class SessionMonitor:
             pending_jobs=self.pending_job_count(account),
             search_url=account.search_url,
             is_custom=bool(account.connector_kind),
+            requires_signin=bool(account.requires_signin),
             needs_search_url=self._needs_a_board(account),
             daily_search_limit=account.daily_search_limit,
             daily_apply_limit=account.daily_apply_limit,

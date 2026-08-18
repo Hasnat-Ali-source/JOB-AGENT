@@ -79,6 +79,23 @@ class SearchPipeline:
         self.db_session = db_session
         self.fit_scorer = get_fit_scorer()
 
+    @property
+    def _master_id(self) -> Optional[int]:
+        """
+        The resume in use, stamped onto everything this run collects.
+
+        Looked up per pipeline rather than cached at import: a run can be
+        started by the same process that just changed the resume.
+
+        Returns:
+            The active master resume's id, or None when none is set
+        """
+        from job_agent.services.resume_sync import active_master
+
+        master = active_master(self.db_session)
+
+        return master.id if master else None
+
     async def search(
         self,
         platform_account: PlatformAccount,
@@ -354,6 +371,12 @@ class SearchPipeline:
 
         # Fit score (Phase 3 heuristic; Phase 4 swaps in the LLM scorer)
         job.fit_score = self.fit_scorer.score_job(job, search_profile)
+
+        # Which resume this posting was found for. The wire shows only the
+        # current resume's postings, so without this a run's results are
+        # indistinguishable from the previous resume's and the wire goes on
+        # showing jobs the user has moved away from.
+        job.matched_master_id = self._master_id
 
         self.db_session.add(job)
         self.db_session.commit()

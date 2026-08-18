@@ -302,6 +302,17 @@ function BlankDetail({ id, onChanged, toast }) {
                   : "New documents attached, and the analyst still has objections",
             )
           }
+          onFit={() =>
+            act(
+              () => api.fitDocumentsToJob(id),
+              // The builder records what the rewrite was worth — "Fit 54% →
+              // 91%" — and that is the whole point of pressing this rather
+              // than plain regeneration.
+              (result) =>
+                result.tailoring_notes?.[0] ||
+                "Documents rewritten for this posting",
+            )
+          }
         />
       ) : null}
 
@@ -538,7 +549,7 @@ function BlankDetail({ id, onChanged, toast }) {
  * they never opened — everything that was wrong with it was knowable, and
  * nothing put it in front of them.
  */
-function AnalysisPanel({ analysis, busy, onRegenerate }) {
+function AnalysisPanel({ analysis, busy, onRegenerate, onFit }) {
   const blockers = analysis.blockers || [];
   const warnings = analysis.warnings || [];
   const defects = blockers.filter((finding) => !finding.overridable);
@@ -573,7 +584,7 @@ function AnalysisPanel({ analysis, busy, onRegenerate }) {
             fixed. Most are fixed by writing the documents again.
           </div>
           {onRegenerate ? (
-            <div style={{ marginTop: "0.5rem" }}>
+            <div className="row" style={{ marginTop: "0.5rem", gap: "0.4rem" }}>
               <button className="btn btn--sm" disabled={busy} onClick={onRegenerate}>
                 Rewrite and re-attach the documents
               </button>
@@ -589,6 +600,21 @@ function AnalysisPanel({ analysis, busy, onRegenerate }) {
             This is a judgement about odds, not a defect. Release anyway if you
             disagree — the decision is recorded.
           </div>
+          {onFit ? (
+            <div style={{ marginTop: "0.5rem" }}>
+              <button className="btn btn--sm" disabled={busy} onClick={onFit}>
+                Fit my documents to this posting
+              </button>
+              <div className="muted" style={{ fontSize: 12, marginTop: "0.3rem" }}>
+                Reframes your summary and rewords every passage into this
+                employer's language, keeping each change only where it actually
+                raises the score. It cannot write in experience your resume does
+                not have — where a posting names a technology you have never
+                used, that gap is what is left, and a closer posting is the
+                better move.
+              </div>
+            </div>
+          ) : null}
         </Notice>
       ))}
 

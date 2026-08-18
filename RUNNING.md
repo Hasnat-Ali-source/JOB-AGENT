@@ -39,6 +39,30 @@ in**. The agent checks the page for a way to sign out before it records the conn
 if it can't find one it says so rather than reporting a station that isn't really there.
 Until at least one station is on line, a run has nothing to search and the desk says so.
 
+### The resume drives everything
+
+Change the resume in use and the rest of the agent follows it, in one step:
+
+1. The resume is read for the roles and skills it supports — the titles you have
+   held, anything your summary says you are **seeking**, and your skills section.
+2. Those become the search profile's titles and keywords. Your location, remote
+   preference, salary floor and exclusions are left alone: a resume says nothing
+   about those and they are your decisions.
+3. Postings found for the previous resume drop off **the wire**. They are not
+   deleted — the register, the audit log and anything already submitted still
+   refer to them, and *Show filtered out* brings them back into view.
+4. A search starts by itself, so the wire refills.
+
+If the wire is ever empty and says postings exist for an earlier resume, press
+**Search for this resume**. The same thing is available any time from
+`POST /api/v1/documents/masters/resync`.
+
+**This is what fixes fit scores.** Fit is decided by which jobs you are looking
+at, not by how well a document is written afterwards. A Full-Stack resume read
+against a wire full of VP-of-Data and Director-of-Support postings scores in
+single figures no matter how good the tailoring is — and that was the real fault
+behind "the fit analyzer isn't working".
+
 ### Which resume is in use
 
 The desk marks one master resume **In use**; every tailored version is built from that
@@ -75,6 +99,43 @@ ollama serve
 A larger model follows the instruction more often than a 3B one — `ollama pull llama3.1:8b`
 is worth it if tailoring keeps refusing passages.
 
+### The fit score, and how to raise it
+
+The score is the share of a posting's requirements your resume can evidence.
+Requirements are matched **by meaning**, using a local embedding model, so
+"Developed responsive component-based interfaces in React" answers "Proficiency
+with modern frontend frameworks" even though they share no words. Turn it on
+with:
+
+```bash
+ollama pull nomic-embed-text
+```
+
+Without it the agent falls back to counting shared words, which badly
+understates a resume that answers a posting in different language.
+
+Two things the score deliberately does *not* do:
+
+- **Credit a technology you have never named.** If a posting asks for Ruby and
+  your resume has never mentioned it, no amount of similar-sounding experience
+  evidences it. Those are listed separately as blocking technologies, and they
+  count double — a screen filters on them first.
+- **Flatter you.** A requirement counts only when the best evidence stands out
+  from the rest of your own resume, not merely above an absolute threshold. Any
+  two pieces of professional English look somewhat alike to an embedding model.
+
+**Fit my documents to this posting**, on an application in the tray, is the
+strongest honest push: it reframes your profile summary for the posting, rewords
+every passage into the employer's language, and keeps each change only where it
+actually raises the score — so it can never make a document worse. It reports
+what it was worth ("Fit 54% → 91%").
+
+Where a posting names something your resume does not have, it says so plainly
+and stops. That gap is real, and the better move is a closer posting. If you
+want a higher score on a role you can genuinely do but your resume does not yet
+show, the fix is to add that work to the master resume — the agent will use it
+the moment it is there.
+
 ### Adding your own stations
 
 The fifteen built-in connectors are a fixed list, and plenty of jobs are on boards that
@@ -104,6 +165,13 @@ said which page you mean, so nothing goes looking for another one.
 Public boards are searched straight away — nothing to sign into. Some consumer boards
 refuse automated requests; if one does, the run says the site refused rather than
 reporting no jobs found.
+
+**If a station is stuck on "needs sign-in".** Ticking the box when you added it is a
+guess, and the wrong guess used to be unrecoverable: a public board can never show a
+sign-out control, so it can never prove it has a session, and *Resume* answers "still
+isn't usable — reconnect it first" for ever. Untick **This station needs me to sign
+in** on the station's card and it comes straight back on line. Most job boards are
+searchable logged out.
 
 **Use the page a stranger can see.** Your own account area is not a listings page —
 `my.greenhouse.io/dashboard` and `app.greenhouse.io` are employer logins with no

@@ -328,7 +328,7 @@ async def review_detail(
                 "created_at": version.created_at.isoformat(),
             })
 
-    analysis = ApplicationAnalyst(session).analyse(application).to_dict()
+    analysis = (await ApplicationAnalyst(session).analyse_async(application)).to_dict()
 
     return {
         **_summary(application, job),
@@ -543,6 +543,13 @@ async def apply_saved_answers(session: Session = Depends(SessionDep)) -> dict:
 @router.post("/{application_id}/regenerate-documents")
 async def regenerate_documents(
     application_id: int,
+    fit_to_posting: bool = Query(
+        False,
+        description=(
+            "Aim the resume at this posting as hard as honesty allows, and "
+            "report what it was worth"
+        ),
+    ),
     session: Session = Depends(SessionDep),
 ) -> dict:
     """
@@ -578,8 +585,14 @@ async def regenerate_documents(
             status_code=404, detail=f"Job {application.job_id} not found"
         )
 
+    builder = DocumentBuilder(session)
+
     try:
-        versions = await DocumentBuilder(session).build_application_package(job)
+        versions = await (
+            builder.build_fitted_package(job)
+            if fit_to_posting
+            else builder.build_application_package(job)
+        )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
@@ -604,7 +617,12 @@ async def regenerate_documents(
     session.commit()
     session.refresh(application)
 
-    report = ApplicationAnalyst(session).analyse(application)
+    report = await ApplicationAnalyst(session).analyse_async(application)
+
+    # What the fit rewrite actually achieved, taken from the notes the builder
+    # recorded on the version. Saying "fit 54% → 91%" is the difference
+    # between an action the user trusts and a button they press hopefully.
+    fit_notes = (resume.tailoring_notes or []) if resume else []
 
     _audit(
         session,
@@ -626,6 +644,8 @@ async def regenerate_documents(
         "cover_letter_version_id": application.cover_letter_version_id,
         "reviewed_by_user": False,
         "analysis": report.to_dict(),
+        "fitted_to_posting": fit_to_posting,
+        "tailoring_notes": fit_notes,
         "next_step": (
             "Read the new documents in the tray and approve again — the "
             "earlier approval was for documents that no longer exist."
@@ -815,7 +835,7 @@ async def application_analysis(
     """
     application = _get_application(session, application_id)
 
-    return ApplicationAnalyst(session).analyse(application).to_dict()
+    return (await ApplicationAnalyst(session).analyse_async(application)).to_dict()
 
 
 # A react-select renders its menu as visible [role="option"] nodes whose ids

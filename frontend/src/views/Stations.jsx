@@ -490,6 +490,8 @@ function SearchUrlRow({ platform, toast, onSaved }) {
         </button>
       </div>
 
+      <SignInSwitch platform={platform} toast={toast} onSaved={onSaved} />
+
       {needsOne ? (
         <div style={{ marginTop: "0.5rem" }}>
           <Notice tone="amber" title="Nothing to search yet">
@@ -499,6 +501,64 @@ function SearchUrlRow({ platform, toast, onSaved }) {
         </div>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * Whether this station has to be signed into, changeable after the fact.
+ *
+ * Ticking "needs sign-in" when a station was added is a guess, and the wrong
+ * guess was unrecoverable: a public board marked private can never prove it
+ * has a session, so it sits in `needs_signin` for ever and Resume answers
+ * "still isn't usable — reconnect it first", which is advice that cannot
+ * work. Most consumer job boards are searchable logged out; this is how you
+ * say so.
+ */
+function SignInSwitch({ platform, toast, onSaved }) {
+  const [busy, setBusy] = useState(false);
+
+  if (!platform.is_custom) return null;
+
+  const change = async (event) => {
+    const requires = event.target.checked;
+    setBusy(true);
+    try {
+      await api.updatePlatform(platform.platform, { requires_signin: requires });
+      toast(
+        requires
+          ? `${platform.platform} will ask you to sign in`
+          : `${platform.platform} marked public — it can be searched now`,
+        "olive",
+      );
+      onSaved();
+    } catch (error) {
+      toast(error.message, "red");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <label
+      className="row"
+      style={{ gap: "0.4rem", marginTop: "0.5rem", fontSize: 12.5 }}
+    >
+      <input
+        type="checkbox"
+        checked={Boolean(platform.requires_signin)}
+        disabled={busy}
+        onChange={change}
+      />
+      <span>
+        This station needs me to sign in
+        {platform.requires_signin ? (
+          <span className="muted">
+            {" "}
+            — untick if its listings are public, and it comes back on line
+          </span>
+        ) : null}
+      </span>
+    </label>
   );
 }
 

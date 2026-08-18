@@ -107,6 +107,8 @@ export const api = {
   atsImprove: (id, apply = false) =>
     request(`/documents/masters/${id}/ats/improve`, { method: "POST", query: { apply } }),
   fitReport: (jobId) => request(`/documents/fit/${jobId}`),
+  resyncPipeline: () =>
+    request("/documents/masters/resync", { method: "POST" }),
   prepareApplication: (jobId) =>
     request(`/jobs/${jobId}/prepare`, { method: "POST" }),
   resumeMatch: (profileId) =>
@@ -152,6 +154,11 @@ export const api = {
   analysis: (id) => request(`/review/${id}/analysis`),
   // Rebuilds the tailored documents and attaches the new ones. Clears the
   // approval: what was approved is not what would now be sent.
+  fitDocumentsToJob: (id) =>
+    request(`/review/${id}/regenerate-documents`, {
+      method: "POST",
+      query: { fit_to_posting: true },
+    }),
   regenerateDocuments: (id) =>
     request(`/review/${id}/regenerate-documents`, { method: "POST" }),
   // acceptWeakFit waives the one finding that is a judgement rather than a

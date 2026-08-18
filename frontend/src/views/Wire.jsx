@@ -22,14 +22,39 @@ import {
 export default function Wire({ toast, onNavigate }) {
   const [showFiltered, setShowFiltered] = useState(false);
   const jobs = useAsync(
-    () => api.jobs({ limit: 200, hard_filter_pass: showFiltered ? undefined : true }),
+    () =>
+      api.jobs({
+        limit: 200,
+        hard_filter_pass: showFiltered ? undefined : true,
+        // "Show filtered out" also lifts the resume filter: the user is
+        // asking to see everything the agent has, and a postings list that
+        // stays empty when you press "show me anyway" reads as broken.
+        for_current_resume: showFiltered ? false : undefined,
+      }),
     [showFiltered],
   );
   // What came in before the filters had their say. Without this, a run that
   // found forty postings and rejected all forty looks identical to a run that
   // found nothing — and the user goes off reconnecting platforms that are fine.
-  const everything = useAsync(() => api.jobs({ limit: 1 }), []);
+  const everything = useAsync(() => api.jobs({ limit: 1, for_current_resume: false }), []);
   const [busyId, setBusyId] = useState(null);
+
+  const resync = async () => {
+    setBusyId("resync");
+    try {
+      const result = await api.resyncPipeline();
+      toast(result.message, "olive");
+      // The run is a background task, so the wire will not have refilled by
+      // the time this returns. Reloading shows whatever landed; the desk's
+      // run history has the rest.
+      jobs.reload();
+      everything.reload();
+    } catch (error) {
+      toast(error.message, "red");
+    } finally {
+      setBusyId(null);
+    }
+  };
 
   if (jobs.loading || everything.loading) return <Loading label="Reading the wire" />;
   if (jobs.error) {
@@ -41,6 +66,41 @@ export default function Wire({ toast, onNavigate }) {
   const totalSeen = everything.data?.total ?? 0;
 
   if (!rows.length && !showFiltered) {
+    // Checked before the hard-filter branch, because it is the more accurate
+    // diagnosis of the same symptom: when the wire is empty and postings do
+    // exist, "they belong to a resume you have moved away from" is the reason,
+    // and "your filters rejected them" would send the user to widen a search
+    // profile that is not the problem.
+    if (jobs.data?.filtered_to_resume && totalSeen > 0) {
+      return (
+        <>
+          <SectionHead
+            title="The wire"
+            hint={`Nothing yet for ${jobs.data.resume_in_use || "this resume"}`}
+          />
+          <Empty
+            mark="New resume"
+            title="No postings have been found for the resume you are using"
+            action={
+              <div className="row" style={{ gap: "0.4rem" }}>
+                <button className="btn" disabled={busyId === "resync"} onClick={resync}>
+                  {busyId === "resync" ? "Searching…" : "Search for this resume"}
+                </button>
+                <button className="btn btn--quiet" onClick={() => setShowFiltered(true)}>
+                  Show earlier postings
+                </button>
+              </div>
+            }
+          >
+            {totalSeen} posting{totalSeen === 1 ? " was" : "s were"} found for an earlier
+            resume. They are kept in the register but are not shown here, because an
+            application built from this resume could not answer them honestly. Searching
+            again reads your resume for the roles it supports and refills the wire.
+          </Empty>
+        </>
+      );
+    }
+
     // Everything that came in was rejected by the hard filters. That is a
     // result, not an absence, and the fix is the search profile — not the
     // platform connections.

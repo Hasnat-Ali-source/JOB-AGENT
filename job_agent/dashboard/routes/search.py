@@ -231,25 +231,43 @@ async def list_jobs(
     status: Optional[str] = Query(None, description="Filter by status"),
     hard_filter_pass: Optional[bool] = Query(None, description="Filter by hard filter pass"),
     min_fit_score: Optional[float] = Query(None, description="Minimum fit score"),
+    for_current_resume: bool = Query(
+        True, description="Only postings found for the resume in use"
+    ),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=500),
     session: Session = Depends(SessionDep),
 ) -> dict:
     """
     List discovered jobs with optional filtering.
-    
+
     Args:
         platform: Filter by platform
         status: Filter by status (new, reviewing, rejected, applied)
         hard_filter_pass: Filter by hard filter pass/fail
         min_fit_score: Minimum fit score (0-1)
+        for_current_resume: Hide postings found for a previous resume. On by
+            default, because the wire is a working list: postings collected
+            for a resume the user has moved away from cannot be applied to
+            honestly, and leaving them there is what made the wire ambiguous.
+            They are hidden rather than deleted — the register, the audit log
+            and any application already sent still refer to them.
         skip: Skip this many results
         limit: Return this many results
-    
+
     Returns:
         Jobs and total count
     """
+    from job_agent.services.resume_sync import active_master
+
     query = session.query(Job)
+
+    master = active_master(session) if for_current_resume else None
+    filtered_to_resume = False
+
+    if master:
+        query = query.filter(Job.matched_master_id == master.id)
+        filtered_to_resume = True
     
     # Apply filters
     if platform:
@@ -333,6 +351,12 @@ async def list_jobs(
     return {
         "total": total,
         "returned": len(jobs),
+        # What the caller is looking at, so the wire can say "nothing here
+        # yet for this resume" rather than "no jobs found", which reads as a
+        # broken agent.
+        "filtered_to_resume": filtered_to_resume,
+        "resume_in_use": master.name if master else None,
+        "resume_in_use_id": master.id if master else None,
         "jobs": [
             {
                 "id": j.id,

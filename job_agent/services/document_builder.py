@@ -189,6 +189,7 @@ class DocumentBuilder:
         job: Job,
         doc_type: DocumentType,
         master: Optional[MasterDocument] = None,
+        fit_to_posting: bool = False,
     ) -> DocumentVersion:
         """
         Generate, verify, and render a tailored variant for a job.
@@ -197,6 +198,12 @@ class DocumentBuilder:
             job: The job to tailor for
             doc_type: Resume or cover letter
             master: Master to tailor (defaults to the active one)
+            fit_to_posting: Aim the resume at this posting as hard as honesty
+                allows — reframe the summary, reword every passage into the
+                employer's language, and keep each change only where it does
+                not cost fit (see `fit_rewrite`). Ordinary tailoring rewords;
+                this one is measured against the posting and reports what it
+                was worth.
 
         Returns:
             The stored DocumentVersion, with pdf_path set
@@ -241,7 +248,39 @@ class DocumentBuilder:
             f"from master #{master.id}"
         )
 
-        result = await self.tailoring.tailor(master.content_text, job, doc_type, profile=profile)
+        if fit_to_posting and doc_type == DocumentType.RESUME:
+            from job_agent.services.fit_rewrite import FitRewriter
+            from job_agent.services.tailoring import TailoringResult
+
+            fitted = await FitRewriter(self.tailoring).rewrite(
+                master.content_text, job
+            )
+
+            result = TailoringResult(
+                content_text=fitted.content_text,
+                generator="fit-rewrite",
+                notes=[fitted.describe(), *fitted.notes],
+            )
+
+            from job_agent.services.fabrication_check import verify_no_fabrication
+
+            result.fabrication_flags = verify_no_fabrication(
+                master.content_text,
+                result.content_text,
+                allowed_terms=self.tailoring._allowed_terms(job)
+                + [
+                    str(getattr(profile, attribute, "") or "")
+                    for attribute in (
+                        "full_name", "email", "phone", "location",
+                        "linkedin_url", "github_url", "portfolio_url",
+                        "website_url",
+                    )
+                ],
+            )
+        else:
+            result = await self.tailoring.tailor(
+                master.content_text, job, doc_type, profile=profile
+            )
         
         if doc_type == DocumentType.RESUME and profile and profile.email:
             if profile.email.lower() not in result.content_text.lower():
@@ -324,6 +363,29 @@ class DocumentBuilder:
             )
 
         return version
+
+    async def build_fitted_package(
+        self, job: Job
+    ) -> List[DocumentVersion]:
+        """
+        Build a resume aimed squarely at one posting, plus a cover letter.
+
+        Args:
+            job: The posting
+
+        Returns:
+            The stored versions
+        """
+        versions = [
+            await self.build_variant(job, DocumentType.RESUME, fit_to_posting=True)
+        ]
+
+        try:
+            versions.append(await self.build_variant(job, DocumentType.COVER_LETTER))
+        except ValueError as e:
+            logger.info(f"No cover letter for '{job.title}': {e}")
+
+        return versions
 
     async def build_application_package(
         self,

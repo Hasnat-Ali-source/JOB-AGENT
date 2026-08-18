@@ -30,8 +30,14 @@ _NUMERIC_PATTERN = re.compile(r"\$?\d[\d,._]*\s?(?:%|[KMB]\b|x\b)?", re.IGNORECA
 # Only spaces and tabs join the words — matching across newlines would splice
 # the last word of one line onto the first word of the next ("Acme Robotics" +
 # "Backend engineer..." → a phantom entity that matches nothing).
+# A word ending in a full stop ends the phrase. Without that, "…a Bachelor's
+# foundation in Computer Science. Skilled in React…" yields the phantom entity
+# "Computer Science. Skilled", which appears in no master document and was
+# reported as an invented name — blocking release of an otherwise honest
+# document over a sentence boundary.
 _PROPER_NOUN_PATTERN = re.compile(
-    r"\b([A-Z][a-zA-Z0-9&.\-]*(?:[ \t]+[A-Z][a-zA-Z0-9&.\-]*)+)"
+    r"\b([A-Z][a-zA-Z0-9&\-]*(?:\.[a-zA-Z0-9&\-]+)*"
+    r"(?:[ \t]+[A-Z][a-zA-Z0-9&\-]*(?:\.[a-zA-Z0-9&\-]+)*)+)"
 )
 
 _EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
@@ -90,8 +96,30 @@ class FabricationCheck:
 
         # 2. Named entities — invented employers, schools, certifications
         for entity in FabricationCheck._proper_nouns(variant_text):
-            if FabricationCheck._normalize(entity) not in haystack:
-                flags.append(f"Name '{entity}' does not appear in the master document")
+            if FabricationCheck._normalize(entity) in haystack:
+                continue
+
+            # An exact-phrase test flags any *recombination* of the master's
+            # own words: "Experienced Full-Stack Developer" is not an invented
+            # organisation, it is the master's own job title with an adjective
+            # in front, and tailoring is supposed to be allowed to do that.
+            # What must still be caught is a name built from words the master
+            # never uses at all — "Initech Corporation".
+            words = re.findall(r"[A-Za-z][\w&-]{3,}", entity)
+
+            supported = sum(
+                1 for word in words
+                if FabricationCheck._normalize(word) in haystack
+            )
+
+            # A strict majority, not merely one word. "Experienced Full-Stack
+            # Developer" is three-quarters the master's own words and passes;
+            # "SimpleX University" is half, and a degree the candidate does
+            # not hold is exactly what this check exists to stop.
+            if words and supported / len(words) > 0.5:
+                continue
+
+            flags.append(f"Name '{entity}' does not appear in the master document")
 
         # 3. Contact details must never be altered
         for email in set(_EMAIL_PATTERN.findall(variant_text)):

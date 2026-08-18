@@ -23,6 +23,7 @@ was tried — an honest dead end beats a confident wrong turn.
 """
 
 import asyncio
+import html
 import logging
 import re
 from dataclasses import dataclass, field
@@ -161,11 +162,11 @@ async def find_listings_page(url: str) -> Discovery:
         timeout=REQUEST_TIMEOUT,
         headers={"User-Agent": USER_AGENT},
     ) as client:
-        html = await _get(client, url)
+        landing = await _get(client, url)
 
         # An exact board URL, or a careers page that already lists postings.
-        if html and LISTINGS_PATH.search(urlparse(url).path or ""):
-            board = _first_ats_link(html, url)
+        if landing and LISTINGS_PATH.search(urlparse(url).path or ""):
+            board = _first_ats_link(landing, url)
 
             if board:
                 return _found(
@@ -173,11 +174,11 @@ async def find_listings_page(url: str) -> Discovery:
                     "this careers page hands off to a hosted job board",
                 )
 
-            if _counts_as_listings(html):
+            if _counts_as_listings(landing):
                 return discovery
 
         # Follow the site's own careers link, then look again from there.
-        for candidate in _careers_links(html or "", url):
+        for candidate in _careers_links(landing or "", url):
             discovery.tried.append(candidate)
             page = await _get(client, candidate)
 
@@ -281,7 +282,7 @@ def _normalise(url: str) -> str:
     return url
 
 
-def _links(html: str, base: str) -> List[Tuple[str, str]]:
+def _links(source: str, base: str) -> List[Tuple[str, str]]:
     """
     Every link on a page, as (absolute href, link text).
 
@@ -290,7 +291,7 @@ def _links(html: str, base: str) -> List[Tuple[str, str]]:
     matter.
 
     Args:
-        html: The page source
+        source: The page source
         base: The URL it was fetched from, for resolving relative hrefs
 
     Returns:
@@ -300,15 +301,19 @@ def _links(html: str, base: str) -> List[Tuple[str, str]]:
 
     for match in re.finditer(
         r"<a\b[^>]*?href\s*=\s*[\"']([^\"'#]+)[\"'][^>]*>(.*?)</a>",
-        html,
+        source,
         re.IGNORECASE | re.DOTALL,
     ):
-        href = match.group(1).strip()
+        # An href in HTML is entity-encoded: a search URL is written
+        # `?q=remote&amp;l=london`, and storing it that way turns the second
+        # parameter into one called "amp;l". The station then searches with
+        # half its query silently dropped.
+        href = html.unescape(match.group(1).strip())
 
         if href.lower().startswith(("javascript:", "mailto:", "tel:")):
             continue
 
-        text = re.sub(r"<[^>]+>", " ", match.group(2))
+        text = html.unescape(re.sub(r"<[^>]+>", " ", match.group(2)))
         text = re.sub(r"\s+", " ", text).strip()
 
         found.append((urljoin(base, href), text))
@@ -316,18 +321,18 @@ def _links(html: str, base: str) -> List[Tuple[str, str]]:
     return found
 
 
-def _first_ats_link(html: str, base: str) -> Optional[str]:
+def _first_ats_link(source: str, base: str) -> Optional[str]:
     """
     The first link to a hosted job board on this page.
 
     Args:
-        html: The page source
+        source: The page source
         base: The URL it was fetched from
 
     Returns:
         The board URL, or None
     """
-    for url, _ in _links(html, base):
+    for url, _ in _links(source, base):
         host = (urlparse(url).netloc or "").lower()
 
         if any(host.endswith(ats) for ats in ATS_HOSTS):
@@ -335,7 +340,7 @@ def _first_ats_link(html: str, base: str) -> Optional[str]:
 
     # Boards are often embedded rather than linked.
     for match in re.finditer(
-        r"<iframe\b[^>]*?src\s*=\s*[\"']([^\"']+)[\"']", html, re.IGNORECASE
+        r"<iframe\b[^>]*?src\s*=\s*[\"']([^\"']+)[\"']", source, re.IGNORECASE
     ):
         url = urljoin(base, match.group(1))
         host = (urlparse(url).netloc or "").lower()
@@ -346,12 +351,12 @@ def _first_ats_link(html: str, base: str) -> Optional[str]:
     return None
 
 
-def _careers_links(html: str, base: str) -> List[str]:
+def _careers_links(source: str, base: str) -> List[str]:
     """
     Links on a homepage that lead towards the jobs, best first.
 
     Args:
-        html: The page source
+        source: The page source
         base: The URL it was fetched from
 
     Returns:
@@ -360,7 +365,7 @@ def _careers_links(html: str, base: str) -> List[str]:
     base_host = (urlparse(base).netloc or "").lower()
     scored: List[Tuple[int, str]] = []
 
-    for url, text in _links(html, base):
+    for url, text in _links(source, base):
         parsed = urlparse(url)
 
         # Off-site links are only worth following when they go to a board.
@@ -384,7 +389,7 @@ def _careers_links(html: str, base: str) -> List[str]:
     return list(dict.fromkeys(ordered))[:4]
 
 
-def _counts_as_listings(html: str) -> bool:
+def _counts_as_listings(source: str) -> bool:
     """
     Whether a page is showing postings rather than talking about working here.
 
@@ -392,14 +397,14 @@ def _counts_as_listings(html: str) -> bool:
     button is not a listings page, and a station pointed at one finds nothing.
 
     Args:
-        html: The page source
+        source: The page source
 
     Returns:
         True when the page carries several posting-shaped links
     """
     hrefs = {
         match.group(0).lower()
-        for match in POSTING_HREF.finditer(html)
+        for match in POSTING_HREF.finditer(source)
     }
 
     return len(hrefs) >= MIN_POSTING_LINKS

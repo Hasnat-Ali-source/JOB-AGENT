@@ -198,6 +198,11 @@ class SearchProfile(SQLModel, table=True):
     salary_max: Optional[int] = None
     date_posted_within_days: Optional[int] = None  # e.g., 7 (last 7 days)
     
+    # The master resume these terms were derived from. Set when the search is
+    # synced to a resume, so the desk can say whether the search still
+    # reflects the resume in use.
+    derived_from_master_id: Optional[int] = None
+
     # Metadata
     is_active: bool = Field(default=True)
 
@@ -414,6 +419,12 @@ class Job(SQLModel, table=True):
     # Deduplication
     dedup_hash: str = Field(index=True)  # Hash of (company + title + location), normalized
     
+    # Which master resume was in use when this posting was collected. The
+    # wire shows only the current resume's postings, so that changing resume
+    # changes what you are looking at — a Full-Stack resume should not be
+    # read against a wire full of VP-of-Data roles found for a previous one.
+    matched_master_id: Optional[int] = Field(default=None, index=True)
+
     # Tracking
     first_seen_at: datetime = Field(default_factory=utcnow)
     
