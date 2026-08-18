@@ -48,6 +48,7 @@ from job_agent.models.database import (
     MasterDocument,
     PlatformAccount,
 )
+from job_agent.services.answer_carry import CarryResult, carry_answers_forward
 from job_agent.services.application_analyst import ApplicationAnalyst
 from job_agent.services.field_classifier import FieldClassifier
 from job_agent.services.submission_gate import SubmissionGate
@@ -452,6 +453,14 @@ async def submit_answers(
         profile.remembered_answers = remembered
         profile.updated_at = utcnow()
 
+    # The other applications in the tray ask the same questions. Saving the
+    # answer for *next time* was never the whole job — the forms that need it
+    # are the ones already waiting, and they were filled before this answer
+    # existed.
+    carried = carry_answers_forward(
+        session, profile, exclude_application_id=application_id
+    )
+
     session.commit()
     session.refresh(application)
 
@@ -460,12 +469,74 @@ async def submit_answers(
         if d.get("required") and d.get("value_entered_by_user") in (None, "")
     ]
 
+    if carried.changed_anything:
+        _audit(
+            session,
+            AuditAction.APPLICATION_REVIEWED,
+            f"Carried {carried.answers_filled} answer(s) onto "
+            f"{carried.applications_updated} other application(s) in the tray",
+            {"source_application_id": application_id, **carried.to_dict()},
+        )
+
     return {
         "status": "recorded",
         "answered": list(answers),
         "remembered_for_future_forms": remembered_count,
         "required_unanswered": outstanding,
         "ready_to_submit": not outstanding,
+        "carried_to_other_applications": carried.to_dict(),
+    }
+
+
+@router.post("/apply-saved-answers")
+async def apply_saved_answers(session: Session = Depends(SessionDep)) -> dict:
+    """
+    Put every answer already saved onto the applications still waiting.
+
+    Answers are carried forward automatically from now on, when one is saved
+    and again when an application is submitted. That does nothing for the
+    answers saved *before* — and there are usually a great many of them,
+    sitting in the profile while the tray asks the same questions again. This
+    is the one-off catch-up for that backlog.
+
+    Returns:
+        What it filled, and on which applications
+    """
+    profile = session.query(CandidateProfile).filter(
+        CandidateProfile.is_active == True  # noqa: E712 — SQL comparison
+    ).first()
+
+    if not profile:
+        raise HTTPException(
+            status_code=404,
+            detail="No candidate profile yet — there are no saved answers to apply",
+        )
+
+    saved = len(profile.remembered_answers or {})
+    carried = carry_answers_forward(session, profile)
+
+    session.commit()
+
+    if carried.changed_anything:
+        _audit(
+            session,
+            AuditAction.APPLICATION_REVIEWED,
+            f"Applied {carried.answers_filled} saved answer(s) to "
+            f"{carried.applications_updated} waiting application(s)",
+            carried.to_dict(),
+        )
+
+    return {
+        "status": "applied",
+        "saved_answers": saved,
+        **carried.to_dict(),
+        "message": carried.describe() or (
+            f"Nothing to fill — the {saved} answer(s) you have saved do not "
+            f"match any unanswered question in the tray."
+            if saved else
+            "You have not saved any answers yet. Answer a form's questions and "
+            "tick 'save these answers' and they will carry to the rest."
+        ),
     }
 
 
@@ -1411,6 +1482,35 @@ async def submit_application(
     )
 
     SubmissionRecorder(session).record(application, account, outcome, initiated_by="user")
+
+    # A submitted application has proved which of its answers the user stands
+    # behind. Everything still waiting in the tray asks most of the same
+    # questions, so it inherits them now rather than asking again.
+    carried = CarryResult()
+
+    if outcome.submitted:
+        profile = (
+            session.query(CandidateProfile)
+            .filter(CandidateProfile.id == application.candidate_profile_id)
+            .first()
+            if application.candidate_profile_id else None
+        )
+
+        carried = carry_answers_forward(
+            session, profile, exclude_application_id=application_id
+        )
+
+        if carried.changed_anything:
+            _audit(
+                session,
+                AuditAction.APPLICATION_REVIEWED,
+                f"Carried {carried.answers_filled} answer(s) from the submitted "
+                f"application onto {carried.applications_updated} still waiting",
+                {"source_application_id": application_id, **carried.to_dict()},
+            )
+
+        session.commit()
+
     session.refresh(application)
     session.refresh(account)
 
@@ -1427,6 +1527,7 @@ async def submit_application(
             else "Submitted, but no confirmation was found — verify with the employer"
         ),
         "errors": outcome.validation_errors,
+        "carried_to_other_applications": carried.to_dict(),
     }
 
 

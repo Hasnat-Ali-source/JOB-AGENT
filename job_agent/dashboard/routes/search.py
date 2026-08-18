@@ -17,7 +17,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from job_agent.models.database import (
-    SearchProfile, PlatformAccount, Job, AuditLog, AuditAction
+    ApplicationStatus, SearchProfile, PlatformAccount, Job, AuditLog, AuditAction
 )
 from job_agent.dashboard.deps import get_session
 from job_agent.core.search_pipeline import SearchPipeline
@@ -285,23 +285,45 @@ async def list_jobs(
         .distinct()
     } if job_ids else set()
 
-    applications = {
-        application.job_id: application
-        for application in session.query(Application)
-        .filter(Application.job_id.in_(job_ids))
-        .all()
-    } if job_ids else {}
+    # A posting can have more than one application against it — the user
+    # discards one and the job comes round again. The live one is the one the
+    # wire should show; a discarded one must not stand in for it, or the row
+    # offers to open something the tray no longer holds.
+    ABANDONED = (
+        ApplicationStatus.REJECTED,
+        ApplicationStatus.WITHDRAWN,
+    )
+
+    applications: dict = {}
+
+    if job_ids:
+        for application in (
+            session.query(Application)
+            .filter(Application.job_id.in_(job_ids))
+            .order_by(Application.id)
+            .all()
+        ):
+            current = applications.get(application.job_id)
+
+            if current is None or current.submission_status in ABANDONED:
+                applications[application.job_id] = application
 
     def _stage(job) -> dict:
         application = applications.get(job.id)
 
-        if application is not None:
+        if application is not None and application.submission_status not in ABANDONED:
             status = (
                 application.submission_status.value
                 if hasattr(application.submission_status, "value")
                 else application.submission_status
             )
             return {"stage": status, "application_id": application.id}
+
+        # Discarded is a stage of its own, and one the user can act on: the
+        # row must offer to prepare the posting again rather than a dead link
+        # into a tray that does not hold it.
+        if application is not None:
+            return {"stage": "discarded", "application_id": None}
 
         if job.id in documented:
             return {"stage": "documents_ready", "application_id": None}
@@ -481,14 +503,29 @@ async def prepare_application(
         HTTPException: If the job, its platform, or its documents are missing
     """
     from job_agent.core.orchestrator import PlatformOutcome, RunOrchestrator
-    from job_agent.models.database import Application, PlatformAccount
+    from job_agent.models.database import Application
 
     job = session.query(Job).filter(Job.id == job_id).first()
 
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
-    existing = session.query(Application).filter(Application.job_id == job_id).first()
+    # Only a *live* application blocks a second one. Refusing because the user
+    # once discarded this posting made "Prepare" on the wire a button that
+    # could only fail: the row said the job was untouched, the tray did not
+    # hold it, and the only way back was to find the discarded record.
+    # Discarding is how a user says "not this one, not yet" — it must not also
+    # mean "never again".
+    existing = (
+        session.query(Application)
+        .filter(
+            Application.job_id == job_id,
+            Application.submission_status.notin_(
+                [ApplicationStatus.REJECTED, ApplicationStatus.WITHDRAWN]
+            ),
+        )
+        .first()
+    )
 
     if existing:
         raise HTTPException(

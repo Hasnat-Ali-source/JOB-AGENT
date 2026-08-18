@@ -513,6 +513,10 @@ function AddStationCard({ toast, onAdded }) {
   const blank = { name: "", url: "", requires_signin: false };
   const [form, setForm] = useState(blank);
   const [busy, setBusy] = useState(false);
+  // Where the agent decided the jobs actually are. Shown after adding,
+  // because a station pointing at the wrong page is only discoverable
+  // otherwise by running a search and getting nothing back.
+  const [landed, setLanded] = useState(null);
 
   const set = (key) => (event) =>
     setForm((current) => ({
@@ -529,6 +533,7 @@ function AddStationCard({ toast, onAdded }) {
     try {
       const result = await api.addStation(form);
       toast(result.message, "olive");
+      setLanded(result.listings_page || null);
       setForm(blank);
       onAdded();
     } catch (error) {
@@ -559,14 +564,13 @@ function AddStationCard({ toast, onAdded }) {
               />
             </label>
             <label className="field">
-              <span className="field__label">Search or listings URL *</span>
+              <span className="field__label">Company website or board URL *</span>
               <input
                 className="input"
                 required
-                type="url"
                 value={form.url}
                 onChange={set("url")}
-                placeholder="https://acme.com/careers?q={query}&l={location}"
+                placeholder="acme.com"
               />
             </label>
           </div>
@@ -583,12 +587,38 @@ function AddStationCard({ toast, onAdded }) {
           </label>
 
           <Notice tone="olive">
-            Paste the page that lists the jobs. Put <code>{"{query}"}</code> and{" "}
-            <code>{"{location}"}</code> where the site's own search terms go and each run
-            fills them in from your search profile; a plain URL is read as it stands.
+            The company's own address is enough — <code>acme.com</code>. The agent
+            follows the site's careers link to the listings, and on to the Greenhouse
+            or Lever board behind it if there is one, and tells you where it landed.
+            Paste an exact board URL instead if you have one. Put{" "}
+            <code>{"{query}"}</code> and <code>{"{location}"}</code> where the site's
+            own search terms go and each run fills them in from your search profile.
             Public boards are searched straight away — tick the box above only if the
             listings are behind a login, and you'll be asked to sign in yourself.
           </Notice>
+
+          {landed ? (
+            <Notice
+              tone={landed.as_given ? "olive" : "amber"}
+              title={
+                landed.as_given
+                  ? "Station points at the URL you gave"
+                  : "Found the listings page"
+              }
+            >
+              <div>
+                Searching <code>{landed.url}</code>
+                {landed.hosted_board ? ` — a ${landed.hosted_board} board` : ""}.
+              </div>
+              {landed.how ? <div className="muted">{landed.how}.</div> : null}
+              {!landed.as_given ? (
+                <div className="muted" style={{ marginTop: "0.35rem" }}>
+                  If that is the wrong page, remove the station and add it again with
+                  the exact listings URL.
+                </div>
+              ) : null}
+            </Notice>
+          ) : null}
 
           <div className="row">
             <span className="spacer" />

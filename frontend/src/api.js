@@ -144,6 +144,8 @@ export const api = {
       method: "POST",
       body: { answers, remember, remember_sensitive: rememberSensitive },
     }),
+  applySavedAnswers: () =>
+    request("/review/apply-saved-answers", { method: "POST" }),
   approve: (id, notes) => request(`/review/${id}/approve`, { method: "POST", body: { notes } }),
   discard: (id, reason) => request(`/review/${id}/discard`, { method: "POST", body: { reason } }),
   eligibility: (id) => request(`/review/${id}/eligibility`),

@@ -238,12 +238,19 @@ export default function Wire({ toast, onNavigate }) {
  */
 const STAGES = {
   found: { label: "Found", tone: undefined, next: null },
+  draft: { label: "Being prepared", tone: "amber", next: "tray" },
   documents_ready: { label: "Documents ready", tone: "olive", next: null },
   queued_for_review: { label: "Waiting on you", tone: "amber", next: "tray" },
   approved: { label: "Approved", tone: "olive", next: "tray" },
   submitted: { label: "Submitted", tone: "olive", next: "register" },
+  email_sent: { label: "Emailed", tone: "olive", next: "register" },
   failed: { label: "Failed", tone: "red", next: "tray" },
-  discarded: { label: "Discarded", tone: undefined, next: null },
+  // A posting the user threw away. It reads as "Found" only if this map has
+  // no entry for it — which is what happened, so a discarded job looked
+  // untouched and its row offered to open an application the tray no longer
+  // held. Preparing it again is the useful action, and the Prepare column
+  // offers exactly that because the backend clears application_id here.
+  discarded: { label: "Discarded", tone: "red", next: null },
 };
 
 function StageCell({ job, onNavigate }) {

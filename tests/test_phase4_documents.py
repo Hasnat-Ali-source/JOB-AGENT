@@ -634,7 +634,7 @@ class TestTailoring:
         result = await offline_service.tailor(MASTER_RESUME, job, DocumentType.RESUME)
 
         assert result.notes
-        assert any("no llm" in n.lower() for n in result.notes)
+        assert any("no model could reword" in n.lower() for n in result.notes)
 
     async def test_llm_output_is_verified_not_trusted(self, offline_service, job):
         """A model that invents a metric must be caught, not passed through."""
@@ -840,23 +840,54 @@ class TestTailoring:
         service.use_ollama = True
         service.use_anthropic = False
 
-        async def echoing_model(master_text, job_record, doc_type):
-            from job_agent.services.tailoring import TailoringResult
-            return TailoringResult(content_text="hi", generator="llm:ollama:tiny")
+        async def useless_model(system, user):
+            return "hi"
 
-        # Simulate the model returning something unusable
-        async def fake_ollama(master_text, job_record, doc_type):
-            result = await echoing_model(master_text, job_record, doc_type)
-            if service._is_usable(result.content_text, master_text, job_record):
-                return None
-            return result
+        async def fake_backend():
+            return useless_model, "a test model"
 
-        monkeypatch.setattr(service, "_tailor_with_ollama", fake_ollama)
+        monkeypatch.setattr(service, "_chat_backend", fake_backend)
 
         result = await service.tailor(MASTER_RESUME, job, DocumentType.RESUME)
 
         assert result.generator == "deterministic"
         assert "Northwind Systems" in result.content_text
+
+    async def test_a_model_rewriting_the_posting_as_experience_is_refused(
+        self, job, monkeypatch
+    ):
+        """
+        The failure anchoring exists to prevent.
+
+        Asked to tailor a whole resume, a small model returns the posting's
+        own responsibilities in the past tense — a forged career that reads
+        as a finished document. Each block is checked against the block it
+        came from, so none of it can be accepted.
+        """
+        service = TailoringService()
+        service.use_ollama = True
+        service.use_anthropic = False
+
+        async def posting_parrot(system, user):
+            # Answers every numbered passage with the posting's own copy.
+            count = user.count("\n\n[") + 1
+            return "\n".join(
+                f"[{i + 1}] Owned the distributed systems roadmap at "
+                f"Northwind's competitor, scaling PostgreSQL and Kafka "
+                f"across every product line."
+                for i in range(count)
+            )
+
+        async def fake_backend():
+            return posting_parrot, "a test model"
+
+        monkeypatch.setattr(service, "_chat_backend", fake_backend)
+
+        result = await service.tailor(MASTER_RESUME, job, DocumentType.RESUME)
+
+        assert result.generator == "deterministic"
+        assert "Lumen Data" in result.content_text
+        assert "competitor" not in result.content_text
 
     async def test_job_keywords_exclude_boilerplate(self, job):
         keywords = TailoringService._job_keywords(job)

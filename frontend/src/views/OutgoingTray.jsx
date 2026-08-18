@@ -73,12 +73,35 @@ export default function OutgoingTray({ toast, onNavigate }) {
   const needingAnswers = items.filter((item) => item.required_unanswered.length > 0);
   const ready = items.filter((item) => item.required_unanswered.length === 0);
 
+  // Answers are carried onto the other blanks as soon as one is saved. Blanks
+  // prepared before that started still ask questions the user has answered
+  // elsewhere, and this is the one action that clears them.
+  const applySaved = async () => {
+    try {
+      const result = await api.applySavedAnswers();
+      toast(result.message, result.answers_filled ? "olive" : "amber");
+      queue.reload();
+    } catch (error) {
+      toast(error.message, "red");
+    }
+  };
+
   return (
     <>
       <SectionHead
         title="Outgoing tray"
         hint={`${items.length} prepared · ${needingAnswers.length} need you · ${ready.length} ready to release`}
-      />
+      >
+        {needingAnswers.length > 0 ? (
+          <button
+            className="btn btn--sm"
+            onClick={applySaved}
+            title="Fill every blank question these forms have already been answered elsewhere"
+          >
+            Use my saved answers
+          </button>
+        ) : null}
+      </SectionHead>
 
       <div className="stack">
         {needingAnswers.map((item) => (
@@ -212,9 +235,19 @@ function BlankDetail({ id, onChanged, toast }) {
     if (!Object.keys(pending).length) return true;
 
     try {
-      await api.answer(id, pending, true, keepSensitive);
+      const result = await api.answer(id, pending, true, keepSensitive);
       setAnswers({});
       detail.reload();
+
+      // The same fifteen questions are on every form in the tray. When an
+      // answer lands on the others too, say so — silently filling them looks
+      // identical to not having saved anything.
+      const carried = result?.carried_to_other_applications;
+      if (carried?.message) {
+        toast(carried.message, "olive");
+        onChanged();
+      }
+
       return true;
     } catch (error) {
       toast(error.message, "red");

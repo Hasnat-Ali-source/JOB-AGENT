@@ -50,32 +50,82 @@ and says so if they have nothing in common. Tailoring reorders and rewords what 
 already says — it will not add experience the resume doesn't contain, so a customer-support
 resume aimed at front-end roles produces honest applications that cannot land.
 
+### How a resume is tailored
+
+The tailored resume is your master, reworded — never a new document. The master is split
+into blocks first, and only prose blocks are sent to a model, one at a time, anchored to
+their own text. Section headings, contact details, employers, dates, the skills list,
+project names, degrees and languages are **copied across untouched**: the model never
+gets the chance to alter them.
+
+Each reworded block is then read back against the block it came from, and refused if it
+loses half the meaning, drops or invents a figure, drops a qualification, claims work at
+the company you are applying to, or adds material the master does not support. A refused
+block keeps your own wording. So the worst case is the master itself, and the best case
+is the master in the employer's vocabulary — it cannot come back shorter.
+
+Each document's notes say exactly how many passages were reworded and why any were
+refused. If they say *no model could reword this resume*, Ollama is not reachable or has
+no usable model installed, and only the bullet ordering changed:
+
+```bash
+ollama serve
+```
+
+A larger model follows the instruction more often than a 3B one — `ollama pull llama3.1:8b`
+is worth it if tailoring keeps refusing passages.
+
 ### Adding your own stations
 
 The fifteen built-in connectors are a fixed list, and plenty of jobs are on boards that
-aren't on it. **Stations → Add a station** takes any listings page by URL:
+aren't on it. **Stations → Add a station** takes a company by its address:
 
 | Field | What to put in it |
 |---|---|
 | Name | Whatever you want to call it — becomes the station's name |
-| Search or listings URL | The page that lists the jobs |
+| Company website or board URL | `acme.com` is enough |
 | Needs sign-in | Tick only if the listings are behind a login |
+
+**The company's own address is enough.** Paste `acme.com` and the agent follows the
+site's careers link to the listings, and on to the Greenhouse, Lever, Ashby or Workday
+board behind it if there is one. It then tells you which page the station will actually
+read — check that line, because a station pointed at the wrong page is otherwise only
+discoverable by running a search and getting nothing back. If it landed somewhere wrong,
+remove the station and add it again with the exact listings URL.
+
+An exact board URL is still taken as given: `https://job-boards.greenhouse.io/COMPANY`
+works and skips the walk entirely.
 
 Put `{query}` and `{location}` in the URL where the site's own search terms go
 (`https://acme.com/careers?q={query}&l={location}`) and each run fills them in from your
-search profile. A plain URL is read as it stands, and the agent will drive the page's own
-search box if it has one.
+search profile. A URL written with placeholders is used exactly as it stands — you have
+said which page you mean, so nothing goes looking for another one.
 
-Public boards are searched straight away — nothing to sign into. A company's Greenhouse,
-Lever or Ashby board works well here: `https://job-boards.greenhouse.io/COMPANY`. Some
-consumer boards refuse automated requests; if one does, the run says the site refused
-rather than reporting no jobs found.
+Public boards are searched straight away — nothing to sign into. Some consumer boards
+refuse automated requests; if one does, the run says the site refused rather than
+reporting no jobs found.
 
-**Use the page a stranger can see.** The URL has to be the public listings page, not your
-own account area — `my.greenhouse.io/dashboard` and `app.greenhouse.io` are employer
-logins with no postings on them. The test: open the URL in a private window. If you still
-see a list of jobs, the agent will too. A run that lands on a page with no postings says
-so, and names the page it read.
+**Use the page a stranger can see.** Your own account area is not a listings page —
+`my.greenhouse.io/dashboard` and `app.greenhouse.io` are employer logins with no
+postings on them. The test: open the URL in a private window. If you still see a list of
+jobs, the agent will too. A run that lands on a page with no postings says so, and names
+the page it read.
+
+### Answering the same question fifteen times
+
+Every form asks for your country, your notice period, your work authorisation. Answer
+them on one application, leave **"save these answers"** ticked, and they are written onto
+every other application waiting in the tray — marked *Your earlier answer* so you can see
+where they came from and change any you disagree with. The same thing happens again when
+an application is submitted.
+
+Two things are never carried: a question already answered on that application, and an
+answer that is not one of the choices the other form offers. A question naming the
+employer ("Have you previously worked at GitLab?") only ever matches that same employer's
+forms, so a company-specific answer cannot end up on someone else's application.
+
+Answers you saved before this existed are not lost — **Use my saved answers** at the top
+of the tray applies the whole backlog in one go.
 
 ---
 

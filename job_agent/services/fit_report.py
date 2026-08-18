@@ -68,7 +68,18 @@ BOILERPLATE = re.compile(
     r"|apply now|talent acquisition|please review|cookie|about (remote|us)\b"
     r"|our mission|we.re always looking|by expressing your interest"
     r"|this is not an active job|future opening|evergreen pipeline"
-    r"|report to our|you will report",
+    r"|report to our|you will report"
+    # What the employer offers, not what it asks for. These were being scored
+    # as requirements the candidate had failed to evidence: a resume cannot
+    # "match" an Employee Stock Purchase Plan, and five such lines pulled a
+    # genuine 40% fit down to single figures.
+    r"|paid time off|parental leave|stock purchase|equity compensation"
+    r"|resource group|development fund|benefits to support|health insurance"
+    r"|dental|vision (care|insurance)|401\(?k|pension|life insurance"
+    r"|home office (budget|stipend)|wellbeing|well-being|discount"
+    r"|we offer|you.ll (get|receive)|perks|compensation range|salary range"
+    r"|base (pay|salary) range|sabbatical|volunteer (day|time)"
+    r"|how .{0,30} supports (full|part).time|how we (hire|support)",
     re.IGNORECASE,
 )
 
@@ -211,17 +222,26 @@ class FitAnalyser:
         # unenrollment" — an actual requirement — read as the start of the
         # compensation section and closed the list after one item.
         opens = re.compile(
-            r"^(what you bring|what we.re looking for|requirements"
-            r"|qualifications|who you are|about you|what you.ll need"
-            r"|skills and experience)\s*:?$",
+            r"^(what you.ll bring|what you bring|what we.re looking for"
+            r"|requirements|qualifications|minimum qualifications"
+            r"|basic qualifications|preferred qualifications|who you are"
+            r"|about you|what you.ll need|what you need to succeed"
+            r"|skills and experience|you.ll bring|you have|your experience"
+            r"|what makes you a good fit|we.re looking for)\s*:?$",
             re.IGNORECASE,
         )
 
-        # Sections that follow the requirements and are not requirements.
+        # Sections that follow the requirements and are not requirements. Left
+        # open, a posting's benefits list becomes fifteen things the candidate
+        # has failed to evidence.
         closes = re.compile(
-            r"^(practicals|benefits|what.s next|how you.ll[^:]{0,40}"
-            r"|application process|about remote|compensation|perks|our values"
-            r"|equal opportunity)\s*:?$",
+            r"^(practicals|benefits|benefits and perks|what.s next"
+            r"|how you.ll[^:]{0,40}|application process|about remote"
+            r"|about the team|about gitlab|about the company|compensation"
+            r"|perks|our values|our culture|life at [\w\s]{0,20}"
+            r"|why join[\w\s]{0,20}|hiring process|interview process"
+            r"|the interview|next steps|remote.first|equal opportunity"
+            r"|country hiring guidelines)\s*:?$",
             re.IGNORECASE,
         )
 

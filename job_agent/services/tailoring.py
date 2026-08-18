@@ -130,7 +130,30 @@ class TailoringService:
         return result
 
     async def _generate(self, master_text: str, job, doc_type: DocumentType) -> TailoringResult:
-        """Try each generator in order of preference."""
+        """
+        Try each generator in order of preference.
+
+        A resume and a cover letter are made in different ways, and conflating
+        them was the root of the worst failure this service had. A letter is
+        new prose assembled from the master's facts, so a model may write it
+        whole. A resume is the master, reworded — so it is rewritten block by
+        block against its own source (see `anchored_rewrite`), which is the
+        only arrangement in which a small model cannot quietly replace the
+        candidate's career with the posting's.
+        """
+        if doc_type == DocumentType.RESUME:
+            result = await self._tailor_resume_anchored(master_text, job)
+
+            if result:
+                return result
+
+            logger.info(
+                "No model could reword the resume — falling back to reordering "
+                "the master's own content"
+            )
+
+            return self._tailor_deterministically(master_text, job, doc_type)
+
         if self.use_anthropic and self.anthropic_api_key:
             result = await self._tailor_with_anthropic(master_text, job, doc_type)
             if result:
@@ -144,6 +167,154 @@ class TailoringService:
         logger.info("No LLM available — using the deterministic tailoring path")
 
         return self._tailor_deterministically(master_text, job, doc_type)
+
+    # ------------------------------------------------------------------
+    # Resumes: rewording, anchored to the master
+    # ------------------------------------------------------------------
+
+    async def _tailor_resume_anchored(
+        self, master_text: str, job
+    ) -> Optional[TailoringResult]:
+        """
+        Reword the master's own blocks into the posting's vocabulary.
+
+        Args:
+            master_text: The master resume
+            job: The posting
+
+        Returns:
+            A TailoringResult, or None when no model is reachable or nothing
+            it returned survived being checked against the master
+        """
+        from job_agent.services.anchored_rewrite import AnchoredRewriter
+
+        backend = await self._chat_backend()
+
+        if not backend:
+            return None
+
+        chat, label = backend
+
+        outcome = await AnchoredRewriter(chat).rewrite(master_text, job)
+
+        if not outcome.changed_anything:
+            logger.info(
+                f"{label} reworded none of the {outcome.rewritable_blocks} "
+                f"rewritable block(s) acceptably"
+                + (f" — first refusal: {outcome.rejected[0]}" if outcome.rejected else "")
+            )
+            return None
+
+        keywords = self._job_keywords(job)
+        text, moved = self._reorder_for_relevance(outcome.text, keywords)
+
+        # Anchoring makes the old failures structurally impossible, so this
+        # should never fire. It runs anyway: the cost is a comparison, and the
+        # thing it guards against is a forged resume reaching an employer.
+        problem = self._is_usable(
+            text, master_text, job, DocumentType.RESUME, anchored=True
+        )
+
+        if problem:
+            logger.warning(
+                f"Anchored rewrite by {label} still failed the document check "
+                f"({problem}) — falling back to the master's own wording"
+            )
+            return None
+
+        notes = [
+            f"Reworded {outcome.rewritten_blocks} of "
+            f"{outcome.rewritable_blocks} passages into this posting's "
+            f"vocabulary, using {label}.",
+            "Headings, dates, employers, qualifications and contact details "
+            "were copied from the master unchanged.",
+        ]
+
+        if moved:
+            notes.append(
+                f"Moved job-relevant bullet points to the top of {moved} section(s)."
+            )
+
+        if outcome.rejected:
+            notes.append(
+                f"{len(outcome.rejected)} rewording(s) were refused and kept the "
+                f"master's wording — first: {outcome.rejected[0]}."
+            )
+
+        return TailoringResult(
+            content_text=text,
+            generator=f"anchored:{label}",
+            notes=notes,
+        )
+
+    async def _chat_backend(self):
+        """
+        The best available model, as a plain async (system, user) -> text call.
+
+        Returning a callable rather than a client keeps `anchored_rewrite`
+        free of any knowledge of which backend is in use.
+
+        Returns:
+            A (chat, label) pair, or None if no model is reachable
+        """
+        if self.use_anthropic and self.anthropic_api_key:
+            try:
+                from anthropic import AsyncAnthropic
+
+                client = AsyncAnthropic(api_key=self.anthropic_api_key)
+                model = self.anthropic_model
+
+                async def chat(system: str, user: str) -> str:
+                    message = await client.messages.create(
+                        model=model,
+                        max_tokens=2048,
+                        system=system,
+                        messages=[{"role": "user", "content": user}],
+                    )
+                    return "".join(
+                        block.text for block in message.content
+                        if getattr(block, "type", "") == "text"
+                    )
+
+                return chat, f"Claude ({model})"
+            except Exception as e:
+                logger.info(f"Claude unavailable ({type(e).__name__}: {e})")
+
+        if self.use_ollama:
+            try:
+                from ollama import AsyncClient
+
+                client = AsyncClient(host=self.ollama_url)
+                model = await self.resolve_ollama_model(client)
+
+                if not model:
+                    return None
+
+                async def chat(system: str, user: str) -> str:
+                    response = await client.chat(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": user},
+                        ],
+                        options={"temperature": 0.2},
+                    )
+                    message = (
+                        getattr(response, "message", None)
+                        or response.get("message")
+                        or {}
+                    )
+                    return (
+                        getattr(message, "content", None)
+                        or message.get("content")
+                        or ""
+                    )
+
+                return chat, f"local model '{model}'"
+            except Exception as e:
+                logger.info(f"Ollama unavailable ({type(e).__name__}: {e})")
+
+        return None
 
     # ------------------------------------------------------------------
     # Prompting
@@ -527,16 +698,24 @@ Write only the answer itself. No preamble, no quotation marks, no commentary.
 
         return self._deterministic_resume(master_text, keywords)
 
-    def _deterministic_resume(self, master_text: str, keywords: List[str]) -> TailoringResult:
+    def _reorder_for_relevance(self, text: str, keywords: List[str]) -> tuple:
         """
-        Reorder bullet points within each section so relevant ones lead.
+        Move the bullets that speak to this posting to the top of their run.
 
-        Section order and headings are preserved — only the ordering of bullets
-        inside a section changes, and nothing is dropped.
+        Nothing is added, removed or reworded: a run of consecutive bullets is
+        sorted by how many of the posting's terms it mentions, and everything
+        else keeps its place. Shared by both resume paths — a reworded resume
+        wants the same ordering a reordered one does.
+
+        Args:
+            text: The document to reorder
+            keywords: The posting's terms
+
+        Returns:
+            (reordered text, how many bullet runs actually changed order)
         """
         from job_agent.services.document_parser import DocumentParser
 
-        lines = master_text.split("\n")
         output: List[str] = []
         bullet_run: List[str] = []
         moved = 0
@@ -558,7 +737,7 @@ Write only the answer itself. No preamble, no quotation marks, no commentary.
             output.extend(scored)
             bullet_run.clear()
 
-        for line in lines:
+        for line in text.split("\n"):
             stripped = line.strip()
 
             if stripped[:1] in ("-", "•", "*", "·"):
@@ -573,7 +752,21 @@ Write only the answer itself. No preamble, no quotation marks, no commentary.
 
         flush()
 
-        notes = ["No LLM available — reordered existing content only, no rewriting."]
+        return "\n".join(output).strip(), moved
+
+    def _deterministic_resume(self, master_text: str, keywords: List[str]) -> TailoringResult:
+        """
+        Reorder bullet points within each section so relevant ones lead.
+
+        Section order and headings are preserved — only the ordering of bullets
+        inside a section changes, and nothing is dropped.
+        """
+        text, moved = self._reorder_for_relevance(master_text, keywords)
+
+        notes = [
+            "No model could reword this resume — reordered existing content "
+            "only, no rewriting."
+        ]
         if moved:
             notes.append(
                 f"Moved job-relevant bullet points to the top of {moved} section(s)."
@@ -582,7 +775,7 @@ Write only the answer itself. No preamble, no quotation marks, no commentary.
             notes.append(f"Matched on: {', '.join(keywords[:8])}")
 
         return TailoringResult(
-            content_text="\n".join(output).strip(),
+            content_text=text,
             generator="deterministic",
             notes=notes,
         )
@@ -735,6 +928,7 @@ Write only the answer itself. No preamble, no quotation marks, no commentary.
         master_text: str,
         job,
         doc_type: DocumentType = DocumentType.RESUME,
+        anchored: bool = False,
     ) -> Optional[str]:
         """
         Decide whether model output is fit to become the user's document.
@@ -753,6 +947,13 @@ Write only the answer itself. No preamble, no quotation marks, no commentary.
                 about echoing and truncation, but not to the ones about
                 carrying a resume's header and credentials — a letter that
                 recited the candidate's degrees would be a worse letter.
+            anchored: True when the content was assembled block by block from
+                the master (see `anchored_rewrite`). Deletion is impossible in
+                that arrangement, and the line-by-line completeness check
+                would misread a genuine rewording as one: a master line is a
+                *wrapped fragment* of a paragraph, and rewording the paragraph
+                legitimately leaves no fragment intact. Running it anyway is
+                what made every reworded resume fall back to the master.
 
         Returns:
             A reason string if unusable, or None if it passes
@@ -770,6 +971,11 @@ Write only the answer itself. No preamble, no quotation marks, no commentary.
         description = (getattr(job, "description", "") or "").strip()
         if len(description) > 60 and description[:60].lower() in content.lower():
             return "output reproduced the job description verbatim"
+
+        lifted = self._lifted_from_posting(content, job)
+
+        if lifted:
+            return f"output presents the posting's own words as experience: {lifted!r}"
 
         # A resume that lost the candidate's name isn't a resume
         first_master_line = next(
@@ -795,6 +1001,9 @@ Write only the answer itself. No preamble, no quotation marks, no commentary.
         if missing:
             return f"output dropped {missing[0]} from the master"
 
+        if anchored:
+            return None
+
         dropped = self._dropped_content(content, master_text)
 
         if dropped:
@@ -802,6 +1011,57 @@ Write only the answer itself. No preamble, no quotation marks, no commentary.
                 f"output dropped {len(dropped)} line(s) from the master, "
                 f"starting with {dropped[0][:60]!r}"
             )
+
+        return None
+
+    # A run this long shared with the posting is not coincidence. Six words
+    # of ordinary English recur; six words of a specific responsibility do
+    # not.
+    _LIFT_WINDOW = 8
+
+    @staticmethod
+    def _lifted_from_posting(content: str, job) -> Optional[str]:
+        """
+        A passage the output took from the posting and presents as experience.
+
+        The fabrication check cannot catch this: it asks whether a claim is
+        supported by the master *or the posting*, because a tailored document
+        legitimately names the company and the role. That allowance is exactly
+        the hole a model walks through when it rewrites the posting's
+        responsibilities in the past tense and calls them the candidate's
+        career — every word is "supported", and none of it happened.
+
+        Args:
+            content: The generated document
+            job: The posting
+
+        Returns:
+            The first lifted passage, or None
+        """
+        posting = " ".join(
+            str(getattr(job, attr, "") or "")
+            for attr in ("description", "requirements")
+        )
+
+        posting_words = re.findall(r"[a-z0-9']+", posting.lower())
+
+        if len(posting_words) < TailoringService._LIFT_WINDOW:
+            return None
+
+        window = TailoringService._LIFT_WINDOW
+
+        runs = {
+            " ".join(posting_words[i:i + window])
+            for i in range(len(posting_words) - window + 1)
+        }
+
+        content_words = re.findall(r"[a-z0-9']+", content.lower())
+
+        for i in range(len(content_words) - window + 1):
+            run = " ".join(content_words[i:i + window])
+
+            if run in runs:
+                return run
 
         return None
 
