@@ -634,7 +634,18 @@ class RunOrchestrator:
                 if not (app_session.form_state or {}).get(
                     "application_form_found", True
                 ):
-                    reason = (app_session.form_state or {}).get("reason", "")
+                    state = app_session.form_state or {}
+                    reason = state.get("reason", "")
+
+                    # An expired posting is not a failure to find a form — it
+                    # is a job that is gone, and leaving it on the wire means
+                    # the user keeps trying it.
+                    if state.get("posting_expired"):
+                        job.status = "expired"
+                        job.hard_filter_pass = False
+                        self.db_session.commit()
+                        logger.info(f"Job {job.id} has expired — closed on the wire")
+
                     logger.info(f"No application form for job {job.id}: {reason}")
                     outcome.errors.append(f"{job.title}: {reason}")
                     continue

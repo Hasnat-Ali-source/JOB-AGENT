@@ -1329,18 +1329,22 @@ class GenericATSConnector(ConnectedPlatformConnector):
             await self._settle()
 
         # If there's no form here yet, look for the apply control
-        if not await self._has_form_fields():
-            if await self._click_first(self.selectors["apply_button"]):
-                await self._settle()
-                logger.info(f"Followed the apply control to {self._page.url}")
+        # Follow the page's own apply controls, hop by hop, rather than
+        # looking once and giving up. On an aggregator the posting page never
+        # has a form: "Quick Apply" goes to the ATS behind it, which may open
+        # a new tab and take twenty seconds to render. See `apply_route`.
+        from job_agent.services.apply_route import ApplyRouteFinder
 
-        # Still nothing that asks for an applicant. On an aggregator this is
-        # the normal case: the posting page is public, and "Quick Apply" is
-        # behind a sign-in or a redirect to the employer's own board. Queueing
-        # anyway produced an application whose only filled field was the
-        # board's search box — better to say plainly that there is no form
-        # here yet.
-        reachable = await self._has_form_fields()
+        route = await ApplyRouteFinder().find(
+            self._page, getattr(self._page, "context", None)
+        )
+
+        # The walk may have ended on a different tab. Everything downstream
+        # fills and screenshots through self._page, so follow it there.
+        if route.page is not None and route.page is not self._page:
+            self._page = route.page
+
+        reachable = route.reached_an_application
 
         return ApplicationSession(
             job=job,
@@ -1348,17 +1352,9 @@ class GenericATSConnector(ConnectedPlatformConnector):
             form_url=self._page.url,
             form_state={
                 "application_form_found": reachable,
-                "reason": (
-                    ""
-                    if reachable
-                    else (
-                        "No application form on this page. This board keeps its "
-                        "apply flow behind a sign-in, or hands off to the "
-                        "employer's own site — open the posting and apply "
-                        "there, or connect this station so the agent can reach "
-                        "the form."
-                    )
-                ),
+                "apply_route": route.to_dict(),
+                "posting_expired": route.expired,
+                "reason": "" if reachable else route.describe(),
             },
         )
 
