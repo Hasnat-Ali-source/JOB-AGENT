@@ -454,6 +454,7 @@ function SearchUrlRow({ platform, toast, onSaved }) {
     return (
       <div style={{ padding: "0 1rem", marginTop: "0.5rem" }}>
         <PauseSwitch platform={platform} toast={toast} onSaved={onSaved} />
+      <ApplyStrategyRow platform={platform} toast={toast} onSaved={onSaved} />
       </div>
     );
   }
@@ -501,6 +502,7 @@ function SearchUrlRow({ platform, toast, onSaved }) {
 
       <SignInSwitch platform={platform} toast={toast} onSaved={onSaved} />
       <PauseSwitch platform={platform} toast={toast} onSaved={onSaved} />
+      <ApplyStrategyRow platform={platform} toast={toast} onSaved={onSaved} />
 
       {needsOne ? (
         <div style={{ marginTop: "0.5rem" }}>
@@ -513,6 +515,63 @@ function SearchUrlRow({ platform, toast, onSaved }) {
     </div>
   );
 }
+
+/**
+ * How this station wants an application built.
+ *
+ * Not every board wants the same thing, and forcing one shape on all of them
+ * is what limited the agent. A board that holds its own resume — Indeed
+ * SmartApply behind SimplyHired, LinkedIn Easy Apply — sends that copy
+ * whatever the agent attaches, so writing a tailored PDF for it is several
+ * minutes of work nobody reads.
+ */
+function ApplyStrategyRow({ platform, toast, onSaved }) {
+  const [busy, setBusy] = useState(false);
+  const current = platform.apply_strategy || "tailored";
+
+  const change = async (event) => {
+    const value = event.target.value;
+    setBusy(true);
+    try {
+      await api.updatePlatform(platform.platform, { apply_strategy: value });
+      toast(
+        value === "tailored"
+          ? `${platform.platform} will get a resume written for each posting`
+          : `${platform.platform} will apply with the resume it already holds — no tailoring`,
+        "olive",
+      );
+      onSaved();
+    } catch (error) {
+      toast(error.message, "red");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ marginTop: "0.6rem" }}>
+      <span className="label">How to apply here</span>
+      <select
+        className="select"
+        value={current}
+        disabled={busy}
+        onChange={change}
+        style={{ marginTop: "0.25rem", fontSize: 12 }}
+      >
+        <option value="tailored">Write a resume for each posting</option>
+        <option value="platform_profile">
+          Apply with the resume this platform holds
+        </option>
+      </select>
+      <div className="muted" style={{ fontSize: 12, marginTop: "0.25rem" }}>
+        {current === "tailored"
+          ? "The agent tailors a resume and cover letter, attaches them, and holds the form for you."
+          : "No tailoring — this board sends its own copy of your resume, so writing one is wasted work."}
+      </div>
+    </div>
+  );
+}
+
 
 /**
  * Take one station out of service without disconnecting it.

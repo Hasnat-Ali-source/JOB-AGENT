@@ -32,6 +32,7 @@ from job_agent.config import settings
 from job_agent.connectors import create_connector_for_account
 from job_agent.core.search_pipeline import SearchPipeline
 from job_agent.models.database import (
+    ApplyStrategy,
     AgentRun,
     AuditAction,
     AuditLog,
@@ -401,8 +402,27 @@ class RunOrchestrator:
                         if job.id not in already_seen
                     ]
 
-            if generate_documents and eligible:
+            # A station that supplies its own documents gets none written for
+            # it. Indeed SmartApply and LinkedIn Easy Apply send the profile's
+            # own resume whatever is attached here, so tailoring for them is
+            # work nobody reads — and it made every application on those
+            # boards several minutes slower for nothing.
+            writes_documents = (
+                getattr(account, "apply_strategy", ApplyStrategy.TAILORED)
+                != ApplyStrategy.PLATFORM_PROFILE
+            )
+
+            if generate_documents and eligible and writes_documents:
                 outcome.documents_generated = await self._generate_documents(eligible)
+            elif generate_documents and eligible:
+                logger.info(
+                    f"{account.platform} applies from its own profile — "
+                    f"skipping document tailoring for {len(eligible)} job(s)"
+                )
+                outcome.errors.append(
+                    f"{account.platform}: applies with the resume held on the "
+                    f"platform, so no documents were tailored"
+                )
 
             # Queue against the eligible jobs, not against how many documents
             # this run happened to write: a job documented by an earlier run
@@ -552,6 +572,12 @@ class RunOrchestrator:
             Number of applications queued
         """
         from job_agent.models.database import CandidateProfile, DocumentType, DocumentVersion
+
+        # Whether this station wants documents attached at all.
+        platform_supplies_documents = (
+            getattr(account, "apply_strategy", ApplyStrategy.TAILORED)
+            == ApplyStrategy.PLATFORM_PROFILE
+        )
         from job_agent.services.application_filler import (
             ApplicationFiller,
             FillOutcome,

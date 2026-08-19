@@ -68,6 +68,8 @@ class PlatformHealth:
     requires_signin: bool = False
     # Out of service by the user's choice, not by failure.
     paused: bool = False
+    # How this station builds an application: "tailored" or "platform_profile".
+    apply_strategy: str = "tailored"
     needs_search_url: bool = False
     daily_search_limit: int = 0
     daily_apply_limit: int = 0
@@ -88,6 +90,7 @@ class PlatformHealth:
             "is_custom": self.is_custom,
             "requires_signin": self.requires_signin,
             "paused": self.paused,
+            "apply_strategy": self.apply_strategy,
             "needs_search_url": self.needs_search_url,
             "daily_search_limit": self.daily_search_limit,
             "daily_apply_limit": self.daily_apply_limit,
@@ -159,6 +162,11 @@ class SessionMonitor:
             is_custom=bool(account.connector_kind),
             requires_signin=bool(account.requires_signin),
             paused=bool(account.paused),
+            apply_strategy=(
+                account.apply_strategy.value
+                if hasattr(account.apply_strategy, "value")
+                else (account.apply_strategy or "tailored")
+            ),
             needs_search_url=self._needs_a_board(account),
             daily_search_limit=account.daily_search_limit,
             daily_apply_limit=account.daily_apply_limit,

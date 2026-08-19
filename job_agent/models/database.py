@@ -33,6 +33,26 @@ class ConnectionStatus(str, Enum):
     ERROR = "error"
 
 
+class ApplyStrategy(str, Enum):
+    """
+    How an application is put together on a given platform.
+
+    Not every board wants the same thing, and forcing one shape on all of them
+    is what limited the agent. Two are genuinely different:
+
+    - TAILORED: the agent writes a resume and cover letter for the posting,
+      attaches them, fills the form and holds it for review. This is where the
+      product's value is, and it needs a board that accepts an upload.
+    - PLATFORM_PROFILE: the platform already holds the documents and answers —
+      Indeed SmartApply, LinkedIn Easy Apply — and an application is a matter
+      of driving its flow. Generating a tailored PDF for one of these is wasted
+      work: the board never asks for it and sends its own copy instead.
+    """
+
+    TAILORED = "tailored"
+    PLATFORM_PROFILE = "platform_profile"
+
+
 class AutomationMode(str, Enum):
     """Automation level for a platform account."""
     SEARCH_ONLY = "search_only"  # Read-only search
@@ -350,6 +370,10 @@ class PlatformAccount(SQLModel, table=True):
     # station you have signed into is expensive to rebuild, so "stop using
     # this one for now" must not mean "disconnect it".
     paused: bool = Field(default=False)
+
+    # How this station wants an application built. See ApplyStrategy: a board
+    # that supplies its own documents should not have documents written for it.
+    apply_strategy: ApplyStrategy = Field(default=ApplyStrategy.TAILORED)
 
     # Whether this station needs a signed-in session. None defers to what the
     # connector declares — the right answer for the built-in platforms. A

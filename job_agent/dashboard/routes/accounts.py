@@ -19,6 +19,7 @@ from sqlmodel import select
 
 from job_agent.connectors import create_connector, is_connector_registered
 from job_agent.models import PlatformAccount, ConnectionStatus, AutomationMode
+from job_agent.models.database import ApplyStrategy
 from job_agent.core.session_manager import get_session_manager
 from job_agent.dashboard.deps import SessionDep
 from job_agent.services.careers_finder import Discovery, find_listings_page
@@ -97,6 +98,39 @@ def _connector_for_url(url: str) -> str:
             return platform
 
     return "generic_ats"
+
+
+# Aggregators that hold the applicant's documents themselves and apply
+# through their own flow. Writing a tailored resume for one is work the board
+# never reads: it sends the copy on the profile whatever is attached.
+_PLATFORM_PROFILE_HOSTS = (
+    "simplyhired.com",
+    "indeed.com",
+    "linkedin.com",
+    "glassdoor.com",
+    "ziprecruiter.com",
+    "monster.com",
+    "careerbuilder.com",
+)
+
+
+def _apply_strategy_for(url: str) -> ApplyStrategy:
+    """
+    Guess how a board wants applications built, from its address.
+
+    Args:
+        url: The station's listings URL
+
+    Returns:
+        The strategy to start with. Changeable on the station card — this is a
+        sensible default, not a verdict.
+    """
+    host = (urlparse(url).netloc or "").lower()
+
+    if any(host.endswith(known) for known in _PLATFORM_PROFILE_HOSTS):
+        return ApplyStrategy.PLATFORM_PROFILE
+
+    return ApplyStrategy.TAILORED
 
 
 def _slugify(name: str) -> str:
@@ -212,6 +246,7 @@ async def add_custom_station(
 
     url = discovery.url
     connector_kind = _connector_for_url(url)
+    strategy = _apply_strategy_for(url)
 
     account = PlatformAccount(
         platform=platform,
@@ -221,6 +256,7 @@ async def add_custom_station(
         connector_kind=connector_kind,
         requires_signin=requires_signin,
         search_url=url,
+        apply_strategy=strategy,
         # A public board has nothing to sign into and can be searched at once.
         # One that does need an account waits until the user has signed in.
         status=(
@@ -248,6 +284,7 @@ async def add_custom_station(
         "platform": account.platform,
         "search_url": account.search_url,
         "connector_kind": connector_kind,
+        "apply_strategy": strategy.value,
         "requires_signin": requires_signin,
         "connection_status": account.status.value,
         # What the walk did, so the user can see which page the station will

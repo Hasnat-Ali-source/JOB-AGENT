@@ -32,6 +32,7 @@ from job_agent.config import settings
 from job_agent.dashboard.deps import get_session
 from job_agent.models.database import (
     Application,
+    ApplyStrategy,
     AuditAction,
     AuditLog,
     AutomationMode,
@@ -402,6 +403,18 @@ async def update_platform_settings(
     if "paused" in payload:
         account.paused = bool(payload["paused"])
 
+    if "apply_strategy" in payload:
+        try:
+            account.apply_strategy = ApplyStrategy(payload["apply_strategy"])
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"apply_strategy must be one of "
+                    f"{', '.join(s.value for s in ApplyStrategy)}"
+                ),
+            )
+
     if "requires_signin" in payload:
         account.requires_signin = bool(payload["requires_signin"])
 
@@ -429,6 +442,11 @@ async def update_platform_settings(
         "search_url": account.search_url,
         "requires_signin": bool(account.requires_signin),
         "paused": bool(account.paused),
+        "apply_strategy": (
+            account.apply_strategy.value
+            if hasattr(account.apply_strategy, "value")
+            else account.apply_strategy
+        ),
         "connection_status": account.status.value if hasattr(account.status, "value") else account.status,
         "note": (
             "Submission still requires "

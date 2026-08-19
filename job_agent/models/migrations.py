@@ -32,6 +32,8 @@ ADDITIVE_COLUMNS: Dict[str, List[Tuple[str, str]]] = {
         ("requires_signin", "BOOLEAN"),  # Whether a user-added station needs a login
         # Taken out of service by the user without losing the sign-in
         ("paused", "BOOLEAN"),
+        # How this station wants an application built
+        ("apply_strategy", "VARCHAR"),
     ],
     "applications": [
         # Phase 4: links to the DocumentVersion records behind the stored paths
