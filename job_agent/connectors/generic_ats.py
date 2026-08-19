@@ -136,10 +136,22 @@ class GenericATSConnector(ConnectedPlatformConnector):
             can_filter=True,
             can_read_details=True,
             can_start_application=True,
-            can_fill_standard_fields=False,  # Phase 3+
-            can_upload_documents=False,  # Phase 3+
-            can_process_custom_questions=False,  # Phase 3+
-            can_submit_automatically=False,  # Phase 3+
+            # These were left False with a "Phase 3+" note from before the
+            # filler existed, and never turned on when it did. The connector
+            # has had `fill_application` — reading the form, filling what the
+            # profile knows, attaching the tailored documents, deferring the
+            # rest, and now walking multi-step forms — for several phases. The
+            # stale flags meant the orchestrator tailored documents for a
+            # user-added station and then logged "cannot fill application
+            # forms", so nothing ever reached the tray from one.
+            can_fill_standard_fields=True,
+            can_upload_documents=True,
+            # Not answered *automatically* — read, classified, and deferred to
+            # the user with a drafted answer where the resume supports one.
+            can_process_custom_questions=True,
+            # Stays false, and is the point of the product: the agent fills
+            # the form and stops. The user releases it.
+            can_submit_automatically=False,
             requires_manual_signin=True,
             requires_manual_review_first_n=5,
             tos_risk_note="Generic connector works on public job boards only. Verify site's ToS before using.",
@@ -1322,18 +1334,52 @@ class GenericATSConnector(ConnectedPlatformConnector):
                 await self._settle()
                 logger.info(f"Followed the apply control to {self._page.url}")
 
+        # Still nothing that asks for an applicant. On an aggregator this is
+        # the normal case: the posting page is public, and "Quick Apply" is
+        # behind a sign-in or a redirect to the employer's own board. Queueing
+        # anyway produced an application whose only filled field was the
+        # board's search box — better to say plainly that there is no form
+        # here yet.
+        reachable = await self._has_form_fields()
+
         return ApplicationSession(
             job=job,
             platform_account_id=0,  # Set by the caller
             form_url=self._page.url,
+            form_state={
+                "application_form_found": reachable,
+                "reason": (
+                    ""
+                    if reachable
+                    else (
+                        "No application form on this page. This board keeps its "
+                        "apply flow behind a sign-in, or hands off to the "
+                        "employer's own site — open the posting and apply "
+                        "there, or connect this station so the agent can reach "
+                        "the form."
+                    )
+                ),
+            },
         )
 
     async def _has_form_fields(self) -> bool:
-        """True if the current page shows any fillable input."""
+        """
+        Whether this page is showing an application form.
+
+        "Any input exists" is not the test, and using it was a real failure:
+        every job board's own header carries a search box, so a posting page
+        with no application form on it looked fillable. The agent duly queued
+        an application whose one filled field was SimplyHired's *"City, State,
+        ZIP or Remote"* search box, set to the candidate's country.
+
+        An application form asks for a person: their name, their email, a
+        resume. That is what is looked for.
+
+        Returns:
+            True when the page is an application form
+        """
         try:
-            return await self._page.locator(
-                "input:not([type=hidden]):not([type=submit]), select, textarea"
-            ).count() > 0
+            return bool(await self._page.evaluate(_LOOKS_LIKE_AN_APPLICATION_JS))
         except Exception:
             return False
 
@@ -1510,3 +1556,43 @@ def _as_plain_text(value: Optional[str]) -> str:
     text = re.sub(r"\n{3,}", "\n\n", text)
 
     return text.strip()
+
+
+# Whether the page in front of us is an application form rather than a posting
+# with the board's own search box in its header.
+#
+# Two independent signals, either of which is enough: a field that asks for
+# something only an applicant supplies (name, email, phone, resume), or a
+# control that says it submits an application.
+_LOOKS_LIKE_AN_APPLICATION_JS = """
+() => {
+  const APPLICANT = /first.?name|last.?name|full.?name|your name|e-?mail|phone|resume|cv\b|cover.?letter|linkedin|portfolio/i;
+  const SEARCHY = /search|keyword|city, state|zip|location|job title, skills/i;
+
+  const fields = Array.from(
+    document.querySelectorAll('input:not([type=hidden]):not([type=submit]):not([type=button]), select, textarea')
+  ).filter(e => {
+    const box = e.getBoundingClientRect();
+    return box.width > 0 && box.height > 0;
+  });
+
+  const describes = (e) => [
+    e.name, e.id, e.placeholder, e.getAttribute('aria-label'),
+    (e.labels && e.labels[0] && e.labels[0].textContent) || ''
+  ].filter(Boolean).join(' ');
+
+  const applicant = fields.filter(e => {
+    const text = describes(e);
+    return APPLICANT.test(text) && !SEARCHY.test(text);
+  });
+
+  if (applicant.length >= 2) return true;
+
+  const submits = Array.from(
+    document.querySelectorAll('button, input[type=submit], [role=button]')
+  ).some(e => /submit application|apply now|submit your application|send application/i
+      .test((e.innerText || e.value || '')));
+
+  return applicant.length >= 1 && submits;
+}
+"""

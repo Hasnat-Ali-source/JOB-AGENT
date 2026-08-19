@@ -552,7 +552,10 @@ class RunOrchestrator:
             Number of applications queued
         """
         from job_agent.models.database import CandidateProfile, DocumentType, DocumentVersion
-        from job_agent.services.application_filler import ApplicationFiller
+        from job_agent.services.application_filler import (
+            ApplicationFiller,
+            FillOutcome,
+        )
 
         connector = create_connector_for_account(account)
 
@@ -622,6 +625,20 @@ class RunOrchestrator:
 
                 app_session = await connector.begin_application(posting)
 
+                # Checked here, before `fill_application` replaces form_state
+                # with its own dict. An aggregator's posting page often has no
+                # application form at all — the apply route is behind a
+                # sign-in or on the employer's own site — and filling one
+                # produced an application whose single field was the board's
+                # own search box, set to the candidate's country.
+                if not (app_session.form_state or {}).get(
+                    "application_form_found", True
+                ):
+                    reason = (app_session.form_state or {}).get("reason", "")
+                    logger.info(f"No application form for job {job.id}: {reason}")
+                    outcome.errors.append(f"{job.title}: {reason}")
+                    continue
+
                 # An application form is a natural place to meet a challenge.
                 # Two very different things look alike here: a wall standing
                 # between the agent and the page, and a tick-box that is part
@@ -659,23 +676,38 @@ class RunOrchestrator:
                 )
 
                 if needs_challenge:
-                    # Surfaced as an unanswered required question, so the tray
-                    # blocks release until the user has dealt with it.
-                    state = app_session.form_state or {}
-                    state.setdefault("required_unanswered", []).append(
-                        "Complete the “I'm not a robot” check on the form yourself "
-                        "before submitting — the agent will not do it for you."
-                    )
-                    app_session.form_state = state
+                    # Surfaced as a deferred *field* rather than appended to a
+                    # list on form_state: `required_deferred` is computed from
+                    # the deferred fields, so anything added only to the list
+                    # vanished the moment the outcome was rebuilt properly.
+                    # As a field it also renders in the tray with the others.
+                    challenge = dict(app_session.deferred_fields or {})
+                    challenge["Complete the “I'm not a robot” check"] = {
+                        "required": True,
+                        "category": "sensitive",
+                        "reason": (
+                            "This form is showing a CAPTCHA. Complete it "
+                            "yourself in the open window before releasing — "
+                            "the agent will not do it for you."
+                        ),
+                    }
+                    app_session.deferred_fields = challenge
 
-                fill_outcome = type("Outcome", (), {
-                    "filled_fields": app_session.filled_fields,
-                    "deferred_fields": app_session.deferred_fields,
-                    "screenshot_path": app_session.screenshot_path,
-                    "errors": (app_session.form_state or {}).get("errors", []),
-                    "required_deferred": (app_session.form_state or {}).get(
-                        "required_unanswered", []),
-                })()
+                # A real FillOutcome rather than an ad-hoc object: this is
+                # handed to `queue_for_review`, which reads every field on it,
+                # and an anonymous type silently lacks whatever gets added to
+                # the dataclass next. It already cost one release — the walk
+                # record was added and this raised "'Outcome' object has no
+                # attribute 'walk'" on every queued application.
+                form_state = app_session.form_state or {}
+
+                fill_outcome = FillOutcome(
+                    filled_fields=app_session.filled_fields or {},
+                    deferred_fields=app_session.deferred_fields or {},
+                    screenshot_path=app_session.screenshot_path,
+                    errors=form_state.get("errors", []),
+                    walk=form_state.get("walk"),
+                )
 
                 resume_version = self.db_session.query(DocumentVersion).filter(
                     DocumentVersion.job_id == job.id,

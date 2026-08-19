@@ -220,14 +220,14 @@ class FilterEvaluator:
             return True
         
         job_location = job.location.lower()
-        
+
         # Remote preference (if specified, must be met)
         if search_profile.remote_pref == "remote":
-            if "remote" not in job_location:
+            if not _is_remote(job):
                 return False  # Want remote, but job isn't remote
-        
+
         elif search_profile.remote_pref == "hybrid":
-            if "hybrid" not in job_location and "remote" not in job_location:
+            if not _is_remote(job) and "hybrid" not in job_location:
                 return False  # Want hybrid/remote, but job is on-site
         
         # A posting listed only as "Remote" names no place at all. Requiring a
@@ -290,6 +290,57 @@ class FilterEvaluator:
         
         # Check if job type matches
         return job.job_type.lower() == search_profile.job_type.lower()
+
+
+# How a posting says it is remote when its location field does not.
+#
+# Aggregators fill `location` with the employer's office and put the
+# remoteness in the title: "Remote Customer Service Representative" at
+# "Mountain View, CA, US" is a remote job. Reading only the location rejected
+# every one of them — a search for remote customer support returned twenty
+# postings and filtered out all twenty, which reads as a broken agent.
+_REMOTE_IN_TITLE = re.compile(
+    r"\bremote\b|\bwork from home\b|\bwfh\b|\btelecommut|\bvirtual\b"
+    r"|\bhome.based\b|\banywhere\b|\bdistributed\b",
+    re.IGNORECASE,
+)
+
+# Weaker evidence, so it has to be explicit. The word "remote" somewhere in a
+# long description is often about a remote *team* the role supports, or a
+# benefit paragraph; these phrasings are about the role itself.
+_REMOTE_IN_DESCRIPTION = re.compile(
+    r"(100%|fully|entirely|completely)\s+remote"
+    r"|remote(\s+first|-first)"
+    r"|this (is a|role is) .{0,20}remote"
+    r"|work from home|telecommut|work remotely|remote position"
+    r"|remote (role|job|opportunity|work arrangement)",
+    re.IGNORECASE,
+)
+
+
+def _is_remote(job: Job) -> bool:
+    """
+    Whether a posting is remote, wherever it happens to say so.
+
+    Args:
+        job: The posting
+
+    Returns:
+        True when the location, the title, the job type or an explicit
+        statement in the description says the role is remote
+    """
+    location = (job.location or "").lower()
+
+    if "remote" in location or "anywhere" in location:
+        return True
+
+    if _REMOTE_IN_TITLE.search(job.title or ""):
+        return True
+
+    if "remote" in (job.job_type or "").lower():
+        return True
+
+    return bool(_REMOTE_IN_DESCRIPTION.search(job.description or ""))
 
 
 def evaluate_hard_filters(job: Job, search_profile: SearchProfile) -> bool:
