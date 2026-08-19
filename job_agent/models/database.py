@@ -346,6 +346,11 @@ class PlatformAccount(SQLModel, table=True):
     # the generic one here and carries its own search_url below.
     connector_kind: Optional[str] = None
 
+    # Taken out of service by the user, without losing the connection. A
+    # station you have signed into is expensive to rebuild, so "stop using
+    # this one for now" must not mean "disconnect it".
+    paused: bool = Field(default=False)
+
     # Whether this station needs a signed-in session. None defers to what the
     # connector declares — the right answer for the built-in platforms. A
     # user-added station says so itself, because the same generic connector
@@ -481,6 +486,12 @@ class Application(SQLModel, table=True):
 
     # Form context (Phase 5)
     form_url: Optional[str] = None  # Where the form was filled
+
+    # How a multi-step form was walked: which steps were read, what was
+    # pressed to advance, and where the walk stopped. Null for a single-page
+    # form. Its own column rather than a key inside filled_fields, which half
+    # a dozen places iterate as form fields and would replay onto the form.
+    form_walk: Optional[dict] = Field(default=None, sa_column=Column(JSON))
     candidate_profile_id: Optional[int] = Field(
         default=None, foreign_key="candidate_profiles.id"
     )

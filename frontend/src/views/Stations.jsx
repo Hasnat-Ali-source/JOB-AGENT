@@ -447,7 +447,16 @@ function SearchUrlRow({ platform, toast, onSaved }) {
   // user's own. Hiding it once a URL was set left no way to correct a wrong
   // one — and pointing a station at the wrong page is the easiest mistake
   // here, because an account dashboard and a job board look alike in a URL bar.
-  if (!needsOne && !platform.is_custom && !platform.search_url) return null;
+  // Pausing applies to every station, so the row itself always renders.
+  const showUrl = needsOne || platform.is_custom || platform.search_url;
+
+  if (!showUrl) {
+    return (
+      <div style={{ padding: "0 1rem", marginTop: "0.5rem" }}>
+        <PauseSwitch platform={platform} toast={toast} onSaved={onSaved} />
+      </div>
+    );
+  }
 
   const save = async () => {
     setBusy(true);
@@ -491,6 +500,7 @@ function SearchUrlRow({ platform, toast, onSaved }) {
       </div>
 
       <SignInSwitch platform={platform} toast={toast} onSaved={onSaved} />
+      <PauseSwitch platform={platform} toast={toast} onSaved={onSaved} />
 
       {needsOne ? (
         <div style={{ marginTop: "0.5rem" }}>
@@ -503,6 +513,54 @@ function SearchUrlRow({ platform, toast, onSaved }) {
     </div>
   );
 }
+
+/**
+ * Take one station out of service without disconnecting it.
+ *
+ * A signed-in station is expensive to rebuild, so "don't use this one for
+ * now" must not mean "throw the session away". Pausing lets a run be aimed at
+ * a specific board without disconnecting the rest.
+ */
+function PauseSwitch({ platform, toast, onSaved }) {
+  const [busy, setBusy] = useState(false);
+
+  const change = async (event) => {
+    const paused = event.target.checked;
+    setBusy(true);
+    try {
+      await api.updatePlatform(platform.platform, { paused });
+      toast(
+        paused
+          ? `${platform.platform} stopped — runs will skip it until you start it again`
+          : `${platform.platform} back in service`,
+        paused ? "amber" : "olive",
+      );
+      onSaved();
+    } catch (error) {
+      toast(error.message, "red");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <label className="row" style={{ gap: "0.4rem", marginTop: "0.4rem", fontSize: 12.5 }}>
+      <input
+        type="checkbox"
+        checked={Boolean(platform.paused)}
+        disabled={busy}
+        onChange={change}
+      />
+      <span>
+        Stop using this station for now
+        {platform.paused ? (
+          <span className="muted"> — runs are skipping it, the sign-in is kept</span>
+        ) : null}
+      </span>
+    </label>
+  );
+}
+
 
 /**
  * Whether this station has to be signed into, changeable after the fact.

@@ -167,6 +167,12 @@ class RunOrchestrator:
         Returns:
             A human-readable reason, or None to run it
         """
+        # The user's own "not this one, for now". Deliberately checked before
+        # every other reason: a paused station should read as paused, not as
+        # broken, however its session happens to be.
+        if getattr(account, "paused", False):
+            return "paused by you — start it again under Stations"
+
         if account.status == ConnectionStatus.DISABLED:
             return "platform is disabled"
 

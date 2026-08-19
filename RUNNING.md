@@ -63,6 +63,14 @@ against a wire full of VP-of-Data and Director-of-Support postings scores in
 single figures no matter how good the tailoring is — and that was the real fault
 behind "the fit analyzer isn't working".
 
+### Removing a resume or cover letter
+
+**Remove** on any master document on the desk. Tailored versions already built
+from it are kept — those are the record of what was actually sent, and deleting
+a master must not rewrite history. Removing the one in use promotes the next
+most recent and re-points the search at it. The agent refuses to remove your
+only resume, because it cannot tailor without one.
+
 ### Which resume is in use
 
 The desk marks one master resume **In use**; every tailored version is built from that
@@ -166,6 +174,25 @@ Public boards are searched straight away — nothing to sign into. Some consumer
 refuse automated requests; if one does, the run says the site refused rather than
 reporting no jobs found.
 
+**Stopping one station without disconnecting it.** Tick **Stop using this
+station for now** on its card. Runs skip it and the sign-in is kept, so you can
+aim a run at one board without disconnecting the rest.
+
+**Boards behind front-door protection.** The agent's browser now presents an
+ordinary desktop Chrome identity. Playwright's default headless user agent
+contains "HeadlessChrome", and a great many boards return 403 to it —
+SimplyHired served a Cloudflare block page to the default and its full listing
+to a normal one, so the agent reported "no jobs found" for a board you could
+see was full of them. Where a site puts up a real CAPTCHA the agent still stops
+and hands it to you; it does not try to get past one.
+
+**Applying on an aggregator.** Searching SimplyHired needs no account. *Quick
+Apply* does, and it now routes through Indeed — so the sign-in has to be in the
+agent's own browser profile, made with **Connect** on the station, not the one
+in your everyday Chrome. Postings that link out to the employer's own board
+(Greenhouse, Lever, Ashby) need no aggregator account at all and are the more
+reliable route.
+
 **If a station is stuck on "needs sign-in".** Ticking the box when you added it is a
 guess, and the wrong guess used to be unrecoverable: a public board can never show a
 sign-out control, so it can never prove it has a session, and *Resume* answers "still
@@ -179,6 +206,30 @@ postings on them. The test: open the URL in a private window. If you still see a
 jobs, the agent will too. A run that lands on a page with no postings says so, and names
 the page it read.
 
+### Forms with more than one page
+
+Most application forms outside Greenhouse are wizards: contact details, then
+work history, then eligibility questions, each behind a **Next**. The agent
+walks them. It reads whichever step is on screen, fills what it can, finds the
+control that goes forward, presses it, and reads the next one. Nothing about
+the sequence is built in — each step is discovered by reading the page as it
+arrives, which is what makes it work on a form nobody wrote a connector for.
+
+The tray shows how far it got: "Walked 4 steps of this form", with what was
+filled on each and which button moved it on.
+
+It stops, deliberately, in four places:
+
+| It stops when | Because |
+|---|---|
+| The next control is **Submit** | Pressing that is yours. The form is left filled and open. |
+| A **required question** has no answer | Clicking past one either trips validation or sends a blank the employer reads. |
+| The page **stops changing** | A Next that does not advance means a validation message the agent cannot see. Retrying is how a filler submits the same broken step forty times. |
+| A **CAPTCHA or sign-in wall** appears | Both are yours to clear. |
+
+It never presses Back, Cancel, or *Create an account* — those lose what has
+been typed or start a different flow.
+
 ### Answering the same question fifteen times
 
 Every form asks for your country, your notice period, your work authorisation. Answer
@@ -191,6 +242,11 @@ Two things are never carried: a question already answered on that application, a
 answer that is not one of the choices the other form offers. A question naming the
 employer ("Have you previously worked at GitLab?") only ever matches that same employer's
 forms, so a company-specific answer cannot end up on someone else's application.
+
+Applications prepared from a resume you have since replaced are hidden from
+the tray, and it says how many. Releasing one would send a document written
+from a resume you have moved away from; prepare those postings again to use the
+current one.
 
 Answers you saved before this existed are not lost — **Use my saved answers** at the top
 of the tray applies the whole backlog in one go.

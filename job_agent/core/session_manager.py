@@ -25,6 +25,13 @@ from job_agent.utils.dates import utcnow
 
 logger = logging.getLogger(__name__)
 
+# What the agent's browser says it is. Kept current-ish: a user agent naming a
+# long-obsolete Chrome is itself a signal that trips front-door protection.
+DESKTOP_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
 
 class SessionManager:
     """
@@ -148,6 +155,29 @@ class SessionManager:
             context = await self.playwright_instance.chromium.launch_persistent_context(
                 user_data_dir=str(profile_dir),
                 headless=headless,
+                # Playwright's default headless user agent contains
+                # "HeadlessChrome", and a great many job boards' front-door
+                # protection returns 403 to it. SimplyHired serves a Cloudflare
+                # block page to the default and the full 3,500-posting listing
+                # to an ordinary Chrome string — the agent reported "no jobs
+                # found" for a board the user could see was full of them.
+                #
+                # This is not evasion of a login or a CAPTCHA: the page is
+                # public, the user can see it in their own browser, and the
+                # agent is asking for exactly the same page. Where a site does
+                # put up a CAPTCHA, the connector still stops and hands it to
+                # the user rather than trying to get past it.
+                user_agent=DESKTOP_USER_AGENT,
+                viewport={"width": 1440, "height": 900},
+                locale="en-US",
+                extra_http_headers={
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+                args=[
+                    # Removes the navigator.webdriver flag that marks the
+                    # browser as automated. Same reasoning as the user agent.
+                    "--disable-blink-features=AutomationControlled",
+                ],
                 # Playwright's bundled Chromium, deliberately not the user's
                 # installed Chrome. Chrome refuses to open a second instance
                 # against a profile while the user's own window is running —

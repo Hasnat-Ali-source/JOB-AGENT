@@ -332,6 +332,105 @@ async def activate_master(
     }
 
 
+@router.delete("/masters/{master_id}")
+async def delete_master(
+    master_id: int,
+    session: Session = Depends(SessionDep),
+) -> dict:
+    """
+    Remove a master document.
+
+    Uploading the wrong file, or a resume aimed at a career you have moved on
+    from, left it on the desk for ever — there was no way to take one off.
+
+    The tailored versions already built from it are kept, and so is anything
+    already submitted: those are the record of what was actually sent, and
+    deleting a master must not rewrite history. They are simply no longer
+    attached to a master that exists.
+
+    Args:
+        master_id: The master to remove
+
+    Returns:
+        What was removed, and what took its place
+
+    Raises:
+        HTTPException: If it does not exist, or is the last resume in use
+    """
+    document = session.query(MasterDocument).filter(
+        MasterDocument.id == master_id
+    ).first()
+
+    if not document:
+        raise HTTPException(status_code=404, detail="Master document not found")
+
+    was_active = document.is_active
+    doc_type = document.doc_type
+    name = document.name
+
+    others = (
+        session.query(MasterDocument)
+        .filter(
+            MasterDocument.doc_type == doc_type,
+            MasterDocument.id != master_id,
+        )
+        .order_by(MasterDocument.created_at.desc())
+        .all()
+    )
+
+    # Deleting the resume in use with nothing to fall back on would leave the
+    # agent unable to tailor anything, and the failure would surface later as
+    # "could not generate documents" rather than here, where it is fixable.
+    if was_active and doc_type == DocumentType.RESUME and not others:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "That is the only resume you have, and the agent cannot tailor "
+                "without one. Upload a replacement first, then remove this."
+            ),
+        )
+
+    versions = (
+        session.query(DocumentVersion)
+        .filter(DocumentVersion.master_document_id == master_id)
+        .count()
+    )
+
+    session.delete(document)
+
+    promoted = None
+    sync = None
+
+    if was_active and others:
+        promoted = others[0]
+        promoted.is_active = True
+
+        if doc_type == DocumentType.RESUME:
+            sync = sync_to_resume(session, promoted)
+
+    session.commit()
+
+    logger.info(f"Deleted master document #{master_id} ({name})")
+
+    return {
+        "status": "deleted",
+        "id": master_id,
+        "name": name,
+        "was_in_use": was_active,
+        "now_in_use": promoted.name if promoted else None,
+        "tailored_versions_kept": versions,
+        "pipeline": sync.to_dict() if sync else None,
+        "message": (
+            f"'{name}' removed"
+            + (f" — '{promoted.name}' is now the one in use" if promoted else "")
+            + (
+                f". {versions} tailored version(s) already built from it were kept."
+                if versions else "."
+            )
+        ),
+    }
+
+
 @router.post("/masters/resync")
 async def resync_pipeline(
     background_tasks: BackgroundTasks,

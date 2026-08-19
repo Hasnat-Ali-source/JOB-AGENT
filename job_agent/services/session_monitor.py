@@ -66,6 +66,8 @@ class PlatformHealth:
     # board permanently "needs_signin", with a Reconnect button that cannot
     # help.
     requires_signin: bool = False
+    # Out of service by the user's choice, not by failure.
+    paused: bool = False
     needs_search_url: bool = False
     daily_search_limit: int = 0
     daily_apply_limit: int = 0
@@ -85,6 +87,7 @@ class PlatformHealth:
             "search_url": self.search_url,
             "is_custom": self.is_custom,
             "requires_signin": self.requires_signin,
+            "paused": self.paused,
             "needs_search_url": self.needs_search_url,
             "daily_search_limit": self.daily_search_limit,
             "daily_apply_limit": self.daily_apply_limit,
@@ -155,6 +158,7 @@ class SessionMonitor:
             search_url=account.search_url,
             is_custom=bool(account.connector_kind),
             requires_signin=bool(account.requires_signin),
+            paused=bool(account.paused),
             needs_search_url=self._needs_a_board(account),
             daily_search_limit=account.daily_search_limit,
             daily_apply_limit=account.daily_apply_limit,

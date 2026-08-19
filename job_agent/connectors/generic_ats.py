@@ -16,7 +16,9 @@ The generic connector uses:
 - Email detection for jobs that only accept email applications
 """
 
+import html
 import logging
+import re
 from typing import List, Optional, Dict, Any, TYPE_CHECKING
 from urllib.parse import quote_plus, urljoin, urlparse
 
@@ -850,6 +852,7 @@ class GenericATSConnector(ConnectedPlatformConnector):
                 external_id="unknown",
                 title="Unable to read",
                 company="Unknown",
+                location="Not specified",
                 description="Page not accessible",
             )
         
@@ -885,13 +888,18 @@ class GenericATSConnector(ConnectedPlatformConnector):
             )
         
         except Exception as e:
-            logger.error(f"Error reading job details: {e}")
+            logger.error(
+                f"Error reading job details from {job_url}: "
+                f"{type(e).__name__}: {e}",
+                exc_info=True,
+            )
             return JobPosting(
                 platform=self.platform_name,
                 external_id="unknown",
                 title="Error",
                 company="Unknown",
-                description=f"Error reading job: {str(e)}",
+                location="Not specified",
+                description=f"Error reading job: {type(e).__name__}: {e}",
                 apply_url=job_url,
             )
     
@@ -939,7 +947,7 @@ class GenericATSConnector(ConnectedPlatformConnector):
                 company=self._scalar(job_data.get("hiringOrganization"), "name") or "Unknown",
                 location=self._extract_location(job_data.get("jobLocation", {})),
                 job_type=self._normalize_job_type(job_data.get("employmentType", "full_time")),
-                description=self._scalar(job_data.get("description")) or "",
+                description=_as_plain_text(self._scalar(job_data.get("description"))),
                 requirements=self._scalar(job_data.get("applicantLocationRequirements")) or "",
                 salary=self._extract_salary(job_data.get("baseSalary", {})),
                 posted_at=self._scalar(job_data.get("datePosted")) or "",
@@ -994,6 +1002,11 @@ class GenericATSConnector(ConnectedPlatformConnector):
             return GenericATSConnector._find_job_posting(data["item"])
 
         return None
+
+    @staticmethod
+    def _plain_text(value: Optional[str]) -> str:
+        """Exposed for tests; see `_as_plain_text`."""
+        return _as_plain_text(value)
 
     @staticmethod
     def _scalar(value: Any, key: Optional[str] = None) -> Optional[str]:
@@ -1361,7 +1374,11 @@ class GenericATSConnector(ConnectedPlatformConnector):
             screenshots_dir=package.get("screenshots_dir"),
         )
 
-        outcome = await filler.fill_form(
+        # The whole application, not just the screen in front of it. Most
+        # boards outside Greenhouse are wizards, and filling only step one
+        # reported an application as ready when four screens had never been
+        # read.
+        outcome = await filler.fill_application(
             self._page,
             candidate_profile,
             documents={
@@ -1382,6 +1399,10 @@ class GenericATSConnector(ConnectedPlatformConnector):
             "errors": outcome.errors,
             "needs_user_input": outcome.needs_user_input,
             "required_unanswered": outcome.required_deferred,
+            # How the form was walked: the steps read, what was pressed to
+            # advance, and where it stopped. The user needs this to know
+            # whether "filled" means one screen or five.
+            "walk": outcome.walk,
             "form_url": self._page.url,
         }
 
@@ -1442,3 +1463,50 @@ class GenericATSConnector(ConnectedPlatformConnector):
                 else "Submitted, but no confirmation could be found on the page"
             ),
         )
+
+
+def _as_plain_text(value: Optional[str]) -> str:
+    """
+    Turn a schema.org description into readable text.
+
+    JSON-LD carries the description as an HTML fragment, and it was being
+    stored verbatim: "<div><p>Career paths start between $14.50…". That HTML
+    then reached three places it had no business being — the fit analyser,
+    which scored `<b>` and `<br>` as content words; the tailoring prompt, where
+    it wasted a small model's context on markup; and the posting the user reads
+    in the tray.
+
+    Block-level tags become line breaks so the structure of a posting — its
+    headings, its bullet list of requirements — survives as plain text, which
+    is what the requirement extractor needs to find them.
+
+    Args:
+        value: A description, possibly HTML
+
+    Returns:
+        Plain text, empty when there was nothing
+    """
+    if not value:
+        return ""
+
+    text = value
+
+    if "<" not in text:
+        return text.strip()
+
+    # Block boundaries first, so paragraphs and list items do not run together
+    # into one unreadable line.
+    text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", text)
+    text = re.sub(r"(?i)</\s*(p|div|li|tr|h[1-6]|ul|ol|table|section)\s*>", "\n", text)
+    text = re.sub(r"(?i)<\s*li[^>]*>", "• ", text)
+
+    # Everything else is presentational.
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+
+    # Collapse the whitespace the tags left behind, keeping paragraph breaks.
+    text = re.sub(r"[ \t\xa0]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return text.strip()

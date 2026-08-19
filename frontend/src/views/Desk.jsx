@@ -249,7 +249,13 @@ function DocumentsCard({ toast, onChanged }) {
                       {master.sections.join(", ") || "no sections detected"}
                     </div>
                   </div>
-                  <AtsBadge master={master} toast={toast} onChanged={masters.reload} />
+                  {/* An ATS score is a resume idea — parseable headings,
+                      dated roles, bulleted claims. A cover letter has none of
+                      those, so the improver could only ever answer "nothing
+                      could be improved", which read as a broken button. */}
+                  {master.doc_type === "resume" ? (
+                    <AtsBadge master={master} toast={toast} onChanged={masters.reload} />
+                  ) : null}
                   {master.is_active ? null : (
                     <button
                       className="btn btn--sm"
@@ -271,6 +277,14 @@ function DocumentsCard({ toast, onChanged }) {
                       Use this one
                     </button>
                   )}
+                  <RemoveMaster
+                    master={master}
+                    toast={toast}
+                    onChanged={() => {
+                      masters.reload();
+                      onChanged?.();
+                    }}
+                  />
                 </div>
               ))}
             </div>
@@ -283,6 +297,60 @@ function DocumentsCard({ toast, onChanged }) {
         </div>
       </div>
     </>
+  );
+}
+
+
+/**
+ * Take a master document off the desk.
+ *
+ * Uploading the wrong file left it there for ever. Removal keeps every
+ * tailored version already built from it — those are the record of what was
+ * actually sent, and deleting a master must not rewrite history.
+ */
+function RemoveMaster({ master, toast, onChanged }) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const remove = async () => {
+    setBusy(true);
+    try {
+      const result = await api.deleteMaster(master.id);
+      toast(result.message, "amber");
+      onChanged?.();
+    } catch (error) {
+      toast(error.message, "red");
+    } finally {
+      setBusy(false);
+      setConfirming(false);
+    }
+  };
+
+  if (!confirming) {
+    return (
+      <button
+        className="btn btn--quiet btn--sm"
+        onClick={() => setConfirming(true)}
+        title={`Remove ${master.name}`}
+      >
+        Remove
+      </button>
+    );
+  }
+
+  return (
+    <span className="row" style={{ gap: "0.3rem" }}>
+      <button className="btn btn--sm" disabled={busy} onClick={remove}>
+        {busy ? "Removing…" : "Really remove"}
+      </button>
+      <button
+        className="btn btn--quiet btn--sm"
+        disabled={busy}
+        onClick={() => setConfirming(false)}
+      >
+        Keep
+      </button>
+    </span>
   );
 }
 

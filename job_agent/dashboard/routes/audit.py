@@ -399,6 +399,9 @@ async def update_platform_settings(
     # deleting the station and adding it again, and the error the user got
     # ("reconnect it first") pointed at a reconnection that could never
     # succeed. Marking a station public clears that state in one step.
+    if "paused" in payload:
+        account.paused = bool(payload["paused"])
+
     if "requires_signin" in payload:
         account.requires_signin = bool(payload["requires_signin"])
 
@@ -425,6 +428,7 @@ async def update_platform_settings(
         "daily_message_limit": account.daily_message_limit,
         "search_url": account.search_url,
         "requires_signin": bool(account.requires_signin),
+        "paused": bool(account.paused),
         "connection_status": account.status.value if hasattr(account.status, "value") else account.status,
         "note": (
             "Submission still requires "

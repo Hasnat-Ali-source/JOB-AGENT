@@ -103,6 +103,7 @@ export const api = {
     return request("/documents/masters", { method: "POST", form });
   },
   activateMaster: (id) => request(`/documents/masters/${id}/activate`, { method: "POST" }),
+  deleteMaster: (id) => request(`/documents/masters/${id}`, { method: "DELETE" }),
   atsScore: (id) => request(`/documents/masters/${id}/ats`),
   atsImprove: (id, apply = false) =>
     request(`/documents/masters/${id}/ats/improve`, { method: "POST", query: { apply } }),

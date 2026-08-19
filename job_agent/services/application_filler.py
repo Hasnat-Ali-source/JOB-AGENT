@@ -52,6 +52,9 @@ class FillOutcome:
     deferred_fields: Dict[str, Any] = dataclass_field(default_factory=dict)
     screenshot_path: Optional[str] = None
     errors: List[str] = dataclass_field(default_factory=list)
+    # How the form was walked, when it had more than one step: which steps
+    # were read, what was pressed to advance, and where the walk stopped.
+    walk: Optional[Dict[str, Any]] = None
 
     @property
     def needs_user_input(self) -> bool:
@@ -86,6 +89,72 @@ class ApplicationFiller:
     # Filling
     # ------------------------------------------------------------------
 
+    async def fill_application(
+        self,
+        page: Any,
+        profile: CandidateProfile,
+        documents: Optional[Dict[str, str]] = None,
+        job: Any = None,
+        master_text: str = "",
+    ) -> FillOutcome:
+        """
+        Fill the whole application, however many steps it takes.
+
+        `fill_form` reads the screen in front of it. That is the entire
+        application on a Greenhouse board and about a fifth of one anywhere
+        else — Workday, iCIMS and most in-house portals are wizards, and
+        reading only their first step reported an application as filled when
+        four screens of it had never been seen. This drives the wizard: read a
+        step, fill it, press Next, read the next one, and stop before submit.
+
+        Args:
+            page: Playwright page on the first step of the form
+            profile: The user's candidate profile
+            documents: {"resume": path, "cover_letter": path}
+            job: The job being applied to
+            master_text: The master resume, the only source of drafted answers
+
+        Returns:
+            A FillOutcome covering every step, with the walk recorded on it
+        """
+        from job_agent.services.form_walker import FormWalker
+
+        merged = FillOutcome()
+
+        async def one_step(current_page: Any) -> FillOutcome:
+            step_outcome = await self.fill_form(
+                current_page,
+                profile,
+                documents=documents,
+                job=job,
+                master_text=master_text,
+                capture_screenshot=False,
+            )
+
+            # Later steps must not overwrite earlier ones: two screens of a
+            # wizard often both ask "Email", and the second answer is not a
+            # correction of the first.
+            for question, detail in step_outcome.filled_fields.items():
+                merged.filled_fields.setdefault(question, detail)
+
+            for question, detail in step_outcome.deferred_fields.items():
+                if question not in merged.filled_fields:
+                    merged.deferred_fields.setdefault(question, detail)
+
+            return step_outcome
+
+        walk = await FormWalker().walk(page, one_step)
+
+        merged.walk = walk.to_dict()
+        merged.screenshot_path = await self._capture_screenshot(page, merged)
+
+        logger.info(
+            f"Filled {len(merged.filled_fields)} field(s) across "
+            f"{walk.step_count} step(s), deferred {len(merged.deferred_fields)}"
+        )
+
+        return merged
+
     async def fill_form(
         self,
         page: Any,
@@ -93,6 +162,7 @@ class ApplicationFiller:
         documents: Optional[Dict[str, str]] = None,
         job: Any = None,
         master_text: str = "",
+        capture_screenshot: bool = True,
     ) -> FillOutcome:
         """
         Fill the application form currently open in the browser.
@@ -156,7 +226,8 @@ class ApplicationFiller:
         if job is not None and master_text:
             await self._draft_open_answers(outcome, job, master_text)
 
-        outcome.screenshot_path = await self._capture_screenshot(page, outcome)
+        if capture_screenshot:
+            outcome.screenshot_path = await self._capture_screenshot(page, outcome)
 
         logger.info(
             f"Filled {len(outcome.filled_fields)} field(s), "
@@ -437,6 +508,10 @@ class ApplicationFiller:
             cover_letter_version=cover_letter_version.pdf_path if cover_letter_version else None,
             filled_fields=outcome.filled_fields,
             deferred_fields=outcome.deferred_fields,
+            # Its own column, not a key inside filled_fields: half a dozen
+            # places iterate that dict as form fields and would replay a walk
+            # record onto the form.
+            form_walk=outcome.walk,
             screenshot_path=outcome.screenshot_path,
             form_url=form_url,
             submission_status=ApplicationStatus.QUEUED_FOR_REVIEW,

@@ -86,6 +86,7 @@ def _summary(application: Application, job: Optional[Job]) -> dict:
         "status": application.submission_status.value,
         "form_url": application.form_url,
         "filled_count": len(application.filled_fields or {}),
+        "form_steps": (application.form_walk or {}).get("step_count", 1),
         "deferred_count": len(deferred),
         "unanswered_count": len(unanswered),
         "required_unanswered": required_unanswered,
@@ -228,6 +229,9 @@ async def list_queue(
     status: Optional[str] = Query(
         "queued_for_review", description="Filter by status; pass 'all' for everything"
     ),
+    for_current_resume: bool = Query(
+        True, description="Only applications built from the resume in use"
+    ),
     session: Session = Depends(SessionDep),
 ) -> dict:
     """
@@ -235,16 +239,40 @@ async def list_queue(
 
     Args:
         status: Application status to filter by, or "all"
+        for_current_resume: Hide applications whose documents were built from
+            a resume no longer in use. On by default: after switching resume
+            the tray otherwise still offers applications carrying the old
+            one's tailored PDF, and releasing one sends a document written
+            from a resume the user has moved away from.
 
     Returns:
         Queue entries and counts
     """
+    from job_agent.services.resume_sync import (
+        active_master,
+        application_uses_current_resume,
+    )
+
     query = session.query(Application)
 
     if status and status != "all":
         query = query.filter(Application.submission_status == status)
 
     applications = query.order_by(Application.created_at.desc()).all()
+
+    master = active_master(session) if for_current_resume else None
+    hidden = 0
+
+    if master:
+        current, stale = [], 0
+
+        for application in applications:
+            if application_uses_current_resume(session, application, master.id):
+                current.append(application)
+            else:
+                stale += 1
+
+        applications, hidden = current, stale
 
     jobs = {
         job.id: job
@@ -259,6 +287,10 @@ async def list_queue(
         "total": len(entries),
         "needs_answers": sum(1 for e in entries if e["required_unanswered"]),
         "ready_to_submit": sum(1 for e in entries if e["ready_to_submit"]),
+        # So the tray can say "3 built from an earlier resume are not shown"
+        # rather than appearing to have lost them.
+        "hidden_from_earlier_resumes": hidden,
+        "resume_in_use": master.name if master else None,
         "applications": entries,
     }
 
@@ -333,6 +365,8 @@ async def review_detail(
     return {
         **_summary(application, job),
         "filled_fields": application.filled_fields or {},
+        # How many steps of this form were read, and where the agent stopped.
+        "walk": application.form_walk,
         "sensitive_questions": sensitive,
         "other_questions": other,
         "documents": documents,

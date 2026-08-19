@@ -88,6 +88,20 @@ export default function OutgoingTray({ toast, onNavigate }) {
 
   return (
     <>
+      {/* Applications built from a resume no longer in use are hidden, not
+          lost. Saying so is the point: after switching resume the tray would
+          otherwise look as though work had disappeared. */}
+      {queue.data?.hidden_from_earlier_resumes ? (
+        <Notice tone="amber" title="Not shown here">
+          {queue.data.hidden_from_earlier_resumes} application
+          {queue.data.hidden_from_earlier_resumes === 1 ? " was" : "s were"} prepared
+          from an earlier resume and {queue.data.hidden_from_earlier_resumes === 1 ? "is" : "are"}{" "}
+          hidden. Releasing one would send a document written from a resume you have
+          moved away from. Prepare those postings again to use{" "}
+          {queue.data.resume_in_use || "the resume in use"}.
+        </Notice>
+      ) : null}
+
       <SectionHead
         title="Outgoing tray"
         hint={`${items.length} prepared · ${needingAnswers.length} need you · ${ready.length} ready to release`}
@@ -161,6 +175,7 @@ function Blank({ summary, open, onToggle, onChanged, toast }) {
           <span className="record muted">
             <span className="label" style={{ display: "inline" }}>Filled </span>
             {summary.filled_count} fields
+            {summary.form_steps > 1 ? ` across ${summary.form_steps} steps` : ""}
           </span>
           <span className="record muted">
             <span className="label" style={{ display: "inline" }}>Deferred </span>
@@ -403,6 +418,49 @@ function BlankDetail({ id, onChanged, toast }) {
             ))}
           </div>
         </section>
+      ) : null}
+
+      {/* How much of a multi-step form the agent actually got through.
+          "Filled 16 fields" reads the same whether that was the whole
+          application or the first screen of five. */}
+      {data.walk && data.walk.step_count > 1 ? (
+        <details className="fold">
+          <summary>{data.walk.message}</summary>
+          <div className="fold__body">
+            <table className="register">
+              <thead>
+                <tr>
+                  <th>Step</th>
+                  <th data-numeric>Filled</th>
+                  <th data-numeric>Deferred</th>
+                  <th>Moved on by</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.walk.steps.map((step) => (
+                  <tr key={step.step}>
+                    <td>{step.step}</td>
+                    <td data-numeric>{step.fields_filled}</td>
+                    <td data-numeric>{step.fields_deferred}</td>
+                    <td className="muted">{step.advanced_by || "— last step"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {data.walk.final_control ? (
+              <p className="muted" style={{ fontSize: 12.5, marginTop: "0.5rem" }}>
+                The last control on this form is “{data.walk.final_control}”. The agent
+                filled up to it and stopped; releasing presses it.
+              </p>
+            ) : null}
+          </div>
+        </details>
+      ) : null}
+
+      {data.walk?.needs_user ? (
+        <Notice tone="amber" title="The agent stopped part-way through this form">
+          {data.walk.stopped_because}
+        </Notice>
       ) : null}
 
       {/* The posting this was written against */}

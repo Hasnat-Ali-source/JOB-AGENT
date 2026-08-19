@@ -30,6 +30,8 @@ ADDITIVE_COLUMNS: Dict[str, List[Tuple[str, str]]] = {
         ("search_url", "VARCHAR"),  # Phase 3: generic connector search entry point
         ("connector_kind", "VARCHAR"),  # Which connector drives a user-added station
         ("requires_signin", "BOOLEAN"),  # Whether a user-added station needs a login
+        # Taken out of service by the user without losing the sign-in
+        ("paused", "BOOLEAN"),
     ],
     "applications": [
         # Phase 4: links to the DocumentVersion records behind the stored paths
@@ -40,6 +42,8 @@ ADDITIVE_COLUMNS: Dict[str, List[Tuple[str, str]]] = {
         ("candidate_profile_id", "INTEGER"),
         ("filled_at", "DATETIME"),
         ("reviewed_at", "DATETIME"),
+        # How a multi-step form was walked
+        ("form_walk", "JSON"),
     ],
     "jobs": [
         # Which master resume was in use when this posting was collected.
