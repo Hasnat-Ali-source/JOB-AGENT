@@ -222,6 +222,19 @@ class ApplyRouteFinder:
                 result.reason = "found the application form"
                 break
 
+            # Once a hop has been taken we are *inside* the apply flow, and
+            # its first step need not look like a form: Indeed's SmartApply
+            # opens on "profile-location" at 33% with four fields and a
+            # Continue button, and none of those fields is named anything a
+            # generic "does this ask for an applicant" test recognises.
+            # Arriving somewhere with fields and a way forward is arrival —
+            # walking the rest of the wizard is the form walker's job.
+            if result.hops and await self._is_a_form_step(page):
+                result.page = page
+                result.found_form = True
+                result.reason = "reached the application flow"
+                break
+
             submit = await self._submit_label(page)
 
             if submit:
@@ -298,12 +311,15 @@ class ApplyRouteFinder:
 
         while waited < SETTLE_MAX_MS:
             try:
-                actionable = await page.evaluate(_SOMETHING_TO_ACT_ON_JS)
+                if await page.evaluate(_SOMETHING_TO_ACT_ON_JS):
+                    return
             except Exception:
-                return
-
-            if actionable:
-                return
+                # Almost always "execution context was destroyed": the page is
+                # mid-navigation. That is the *normal* state of an apply flow
+                # bouncing through its redirects, and treating it as a reason
+                # to stop waiting was why every hop landed on nothing —
+                # SmartApply redirects twice before it renders.
+                pass
 
             try:
                 await page.wait_for_timeout(SETTLE_POLL_MS)
@@ -362,6 +378,42 @@ class ApplyRouteFinder:
                             const t = describe(e);
                             return APPLICANT.test(t) && !SEARCHY.test(t);
                         }).length >= 2;
+                    }"""
+                )
+            )
+        except Exception:
+            return False
+
+    async def _is_a_form_step(self, page: Any) -> bool:
+        """
+        Whether this page is a step of an application, rather than a landing.
+
+        Args:
+            page: Playwright page
+
+        Returns:
+            True when it has fields to fill and a control that carries on
+        """
+        try:
+            return bool(
+                await page.evaluate(
+                    """() => {
+                        const vis = e => {
+                            const b = e.getBoundingClientRect();
+                            return b.width > 0 && b.height > 0;
+                        };
+                        const fields = [...document.querySelectorAll(
+                            'input:not([type=hidden]):not([type=submit]),select,textarea'
+                        )].filter(vis);
+
+                        if (!fields.length) return false;
+
+                        const FORWARD = /^(continue|next|save and continue|submit|apply|review)/i;
+                        return [...document.querySelectorAll(
+                            'button,[role=button],input[type=submit]'
+                        )].filter(vis)
+                          .map(e => (e.innerText || e.value || '').trim())
+                          .some(t => FORWARD.test(t));
                     }"""
                 )
             )
