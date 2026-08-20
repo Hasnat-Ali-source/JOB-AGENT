@@ -25,12 +25,25 @@ logger = logging.getLogger(__name__)
 
 # Canonical section -> heading spellings seen in the wild
 SECTION_ALIASES: Dict[str, List[str]] = {
-    "summary": ["summary", "profile", "objective", "about", "professional summary"],
+    # "PROFILE SUMMARY" is the heading on the resume this project was built
+    # against and it was not in this list, so the summary section could not be
+    # located at all — which silently disabled the one rewrite with the most
+    # to gain. Heading vocabulary is cheap; missing one is not.
+    "summary": [
+        "summary", "profile", "objective", "about", "professional summary",
+        "profile summary", "career summary", "personal summary",
+        "professional profile", "career profile", "executive summary",
+        "career objective", "personal statement", "overview",
+    ],
     "experience": [
         "experience", "work experience", "employment", "professional experience",
-        "work history", "career history",
+        "work history", "career history", "employment history",
+        "relevant experience", "professional background",
     ],
-    "education": ["education", "academic background", "qualifications"],
+    "education": [
+        "education", "academic background", "qualifications",
+        "education and training", "academic qualifications",
+    ],
     "skills": [
         "skills", "technical skills", "core skills", "key skills",
         "core competencies", "competencies", "technologies", "skills summary",

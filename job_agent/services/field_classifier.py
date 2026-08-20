@@ -51,6 +51,8 @@ class FormField:
     aria_label: str = ""
     required: bool = False
     options: List[str] = None  # For select / radio groups
+    answered: bool = False  # The form already holds an answer for this
+    current: str = ""  # What that answer is, as the user reads it
 
     def __post_init__(self):
         if self.options is None:
@@ -239,6 +241,14 @@ class FieldClassifier:
         ("willing_to_relocate", _patterns(r"relocat")),
     ]
 
+    # Profile values that are the user's own details rather than an answer to
+    # a question. None of these is ever one of a form's offered choices, so a
+    # chooser matching one of their patterns has been misread.
+    TEXT_ONLY_ATTRIBUTES = frozenset({
+        "email", "phone", "full_name", "first_name", "last_name",
+        "linkedin_url", "github_url", "portfolio_url", "website_url",
+    })
+
     # Document uploads are handled separately from profile text
     RESUME_PATTERNS = _patterns(r"resume", r"\bcv\b", r"curriculum vitae")
     COVER_LETTER_PATTERNS = _patterns(r"cover letter", r"covering letter", r"motivation")
@@ -296,7 +306,25 @@ class FieldClassifier:
                 ),
             )
 
-        # 2. Document uploads
+        # 2. The user's own answer to this very question.
+        #
+        # Ahead of the profile mappings, because those match on wording that
+        # merely *mentions* a profile concept. An employer's SMS-consent
+        # question ends "...at the mobile number provided?", which the phone
+        # pattern matched, so a Yes/No consent question was answered with the
+        # user's phone number — and the answer they had given for that exact
+        # question, sitting in the bank, was never reached. A saved answer is
+        # the user's own words about this question; a pattern match is a guess
+        # about what the question is. The guess does not outrank them.
+        remembered_key = self.remember_key(field.question)
+        if remembered_key in self.remembered:
+            return FieldClassification(
+                category=FieldCategory.REMEMBERED,
+                value=str(self.remembered[remembered_key]),
+                reason="You answered this question on an earlier application",
+            )
+
+        # 3. Document uploads
         if self._matches(haystack, self.RESUME_PATTERNS):
             return FieldClassification(
                 category=FieldCategory.KNOWN,
@@ -311,33 +339,53 @@ class FieldClassifier:
                 reason="Tailored cover letter from this application's document package",
             )
 
-        # 3. Split name fields
+        # 4. Split name fields
         if self._matches(haystack, self.FIRST_NAME_PATTERNS):
             return self._from_profile("first_name", "First name from your profile")
 
         if self._matches(haystack, self.LAST_NAME_PATTERNS):
             return self._from_profile("last_name", "Last name from your profile")
 
-        # 4. Straight profile mappings
+        # 5. Straight profile mappings.
+        #
+        # An identity value never answers a chooser. "Do you consent to texts
+        # at the mobile number provided?" matches the phone pattern, and its
+        # answers are Yes and No — filling the user's phone number in there is
+        # not a near miss, it is answering a question the agent misread. But
+        # plenty of profile values *are* legitimate choices: work authorization
+        # onto a Yes/No dropdown is exactly right, and `_closest_option` at
+        # fill time refuses anything the list does not offer.
+        chooser = self._is_a_chooser(field)
+
         for attribute, patterns in self.KNOWN_PATTERNS:
+            if chooser and attribute in self.TEXT_ONLY_ATTRIBUTES:
+                continue
+
             if self._matches(haystack, patterns):
                 return self._from_profile(
                     attribute, f"'{attribute.replace('_', ' ')}' from your profile"
                 )
 
-        # 5. A question the user has already answered before
-        remembered_key = self.remember_key(field.question)
-        if remembered_key in self.remembered:
-            return FieldClassification(
-                category=FieldCategory.REMEMBERED,
-                value=str(self.remembered[remembered_key]),
-                reason="You answered this question on an earlier application",
-            )
-
         # 6. Anything else
         return FieldClassification(
             category=FieldCategory.UNKNOWN,
             reason="The agent could not map this question to your profile",
+        )
+
+    @staticmethod
+    def _is_a_chooser(field: FormField) -> bool:
+        """
+        Whether this field picks from a fixed set rather than taking text.
+
+        Args:
+            field: The field
+
+        Returns:
+            True for radio groups, checkboxes and anything offering options
+        """
+        return (
+            field.field_type in ("radio", "checkbox")
+            or bool(field.options)
         )
 
     def _from_profile(self, attribute: str, reason: str) -> FieldClassification:

@@ -39,6 +39,38 @@ in**. The agent checks the page for a way to sign out before it records the conn
 if it can't find one it says so rather than reporting a station that isn't really there.
 Until at least one station is on line, a run has nothing to search and the desk says so.
 
+### The resume drives everything
+
+Change the resume in use and the rest of the agent follows it, in one step:
+
+1. The resume is read for the roles and skills it supports — the titles you have
+   held, anything your summary says you are **seeking**, and your skills section.
+2. Those become the search profile's titles and keywords. Your location, remote
+   preference, salary floor and exclusions are left alone: a resume says nothing
+   about those and they are your decisions.
+3. Postings found for the previous resume drop off **the wire**. They are not
+   deleted — the register, the audit log and anything already submitted still
+   refer to them, and *Show filtered out* brings them back into view.
+4. A search starts by itself, so the wire refills.
+
+If the wire is ever empty and says postings exist for an earlier resume, press
+**Search for this resume**. The same thing is available any time from
+`POST /api/v1/documents/masters/resync`.
+
+**This is what fixes fit scores.** Fit is decided by which jobs you are looking
+at, not by how well a document is written afterwards. A Full-Stack resume read
+against a wire full of VP-of-Data and Director-of-Support postings scores in
+single figures no matter how good the tailoring is — and that was the real fault
+behind "the fit analyzer isn't working".
+
+### Removing a resume or cover letter
+
+**Remove** on any master document on the desk. Tailored versions already built
+from it are kept — those are the record of what was actually sent, and deleting
+a master must not rewrite history. Removing the one in use promotes the next
+most recent and re-points the search at it. The agent refuses to remove your
+only resume, because it cannot tailor without one.
+
 ### Which resume is in use
 
 The desk marks one master resume **In use**; every tailored version is built from that
@@ -50,32 +82,174 @@ and says so if they have nothing in common. Tailoring reorders and rewords what 
 already says — it will not add experience the resume doesn't contain, so a customer-support
 resume aimed at front-end roles produces honest applications that cannot land.
 
+### How a resume is tailored
+
+The tailored resume is your master, reworded — never a new document. The master is split
+into blocks first, and only prose blocks are sent to a model, one at a time, anchored to
+their own text. Section headings, contact details, employers, dates, the skills list,
+project names, degrees and languages are **copied across untouched**: the model never
+gets the chance to alter them.
+
+Each reworded block is then read back against the block it came from, and refused if it
+loses half the meaning, drops or invents a figure, drops a qualification, claims work at
+the company you are applying to, or adds material the master does not support. A refused
+block keeps your own wording. So the worst case is the master itself, and the best case
+is the master in the employer's vocabulary — it cannot come back shorter.
+
+Each document's notes say exactly how many passages were reworded and why any were
+refused. If they say *no model could reword this resume*, Ollama is not reachable or has
+no usable model installed, and only the bullet ordering changed:
+
+```bash
+ollama serve
+```
+
+A larger model follows the instruction more often than a 3B one — `ollama pull llama3.1:8b`
+is worth it if tailoring keeps refusing passages.
+
+### The fit score, and how to raise it
+
+The score is the share of a posting's requirements your resume can evidence.
+Requirements are matched **by meaning**, using a local embedding model, so
+"Developed responsive component-based interfaces in React" answers "Proficiency
+with modern frontend frameworks" even though they share no words. Turn it on
+with:
+
+```bash
+ollama pull nomic-embed-text
+```
+
+Without it the agent falls back to counting shared words, which badly
+understates a resume that answers a posting in different language.
+
+Two things the score deliberately does *not* do:
+
+- **Credit a technology you have never named.** If a posting asks for Ruby and
+  your resume has never mentioned it, no amount of similar-sounding experience
+  evidences it. Those are listed separately as blocking technologies, and they
+  count double — a screen filters on them first.
+- **Flatter you.** A requirement counts only when the best evidence stands out
+  from the rest of your own resume, not merely above an absolute threshold. Any
+  two pieces of professional English look somewhat alike to an embedding model.
+
+**Fit my documents to this posting**, on an application in the tray, is the
+strongest honest push: it reframes your profile summary for the posting, rewords
+every passage into the employer's language, and keeps each change only where it
+actually raises the score — so it can never make a document worse. It reports
+what it was worth ("Fit 54% → 91%").
+
+Where a posting names something your resume does not have, it says so plainly
+and stops. That gap is real, and the better move is a closer posting. If you
+want a higher score on a role you can genuinely do but your resume does not yet
+show, the fix is to add that work to the master resume — the agent will use it
+the moment it is there.
+
 ### Adding your own stations
 
 The fifteen built-in connectors are a fixed list, and plenty of jobs are on boards that
-aren't on it. **Stations → Add a station** takes any listings page by URL:
+aren't on it. **Stations → Add a station** takes a company by its address:
 
 | Field | What to put in it |
 |---|---|
 | Name | Whatever you want to call it — becomes the station's name |
-| Search or listings URL | The page that lists the jobs |
+| Company website or board URL | `acme.com` is enough |
 | Needs sign-in | Tick only if the listings are behind a login |
+
+**The company's own address is enough.** Paste `acme.com` and the agent follows the
+site's careers link to the listings, and on to the Greenhouse, Lever, Ashby or Workday
+board behind it if there is one. It then tells you which page the station will actually
+read — check that line, because a station pointed at the wrong page is otherwise only
+discoverable by running a search and getting nothing back. If it landed somewhere wrong,
+remove the station and add it again with the exact listings URL.
+
+An exact board URL is still taken as given: `https://job-boards.greenhouse.io/COMPANY`
+works and skips the walk entirely.
 
 Put `{query}` and `{location}` in the URL where the site's own search terms go
 (`https://acme.com/careers?q={query}&l={location}`) and each run fills them in from your
-search profile. A plain URL is read as it stands, and the agent will drive the page's own
-search box if it has one.
+search profile. A URL written with placeholders is used exactly as it stands — you have
+said which page you mean, so nothing goes looking for another one.
 
-Public boards are searched straight away — nothing to sign into. A company's Greenhouse,
-Lever or Ashby board works well here: `https://job-boards.greenhouse.io/COMPANY`. Some
-consumer boards refuse automated requests; if one does, the run says the site refused
-rather than reporting no jobs found.
+Public boards are searched straight away — nothing to sign into. Some consumer boards
+refuse automated requests; if one does, the run says the site refused rather than
+reporting no jobs found.
 
-**Use the page a stranger can see.** The URL has to be the public listings page, not your
-own account area — `my.greenhouse.io/dashboard` and `app.greenhouse.io` are employer
-logins with no postings on them. The test: open the URL in a private window. If you still
-see a list of jobs, the agent will too. A run that lands on a page with no postings says
-so, and names the page it read.
+**Stopping one station without disconnecting it.** Tick **Stop using this
+station for now** on its card. Runs skip it and the sign-in is kept, so you can
+aim a run at one board without disconnecting the rest.
+
+**Boards behind front-door protection.** The agent's browser now presents an
+ordinary desktop Chrome identity. Playwright's default headless user agent
+contains "HeadlessChrome", and a great many boards return 403 to it —
+SimplyHired served a Cloudflare block page to the default and its full listing
+to a normal one, so the agent reported "no jobs found" for a board you could
+see was full of them. Where a site puts up a real CAPTCHA the agent still stops
+and hands it to you; it does not try to get past one.
+
+**Applying on an aggregator.** Searching SimplyHired needs no account. *Quick
+Apply* does, and it now routes through Indeed — so the sign-in has to be in the
+agent's own browser profile, made with **Connect** on the station, not the one
+in your everyday Chrome. Postings that link out to the employer's own board
+(Greenhouse, Lever, Ashby) need no aggregator account at all and are the more
+reliable route.
+
+**If a station is stuck on "needs sign-in".** Ticking the box when you added it is a
+guess, and the wrong guess used to be unrecoverable: a public board can never show a
+sign-out control, so it can never prove it has a session, and *Resume* answers "still
+isn't usable — reconnect it first" for ever. Untick **This station needs me to sign
+in** on the station's card and it comes straight back on line. Most job boards are
+searchable logged out.
+
+**Use the page a stranger can see.** Your own account area is not a listings page —
+`my.greenhouse.io/dashboard` and `app.greenhouse.io` are employer logins with no
+postings on them. The test: open the URL in a private window. If you still see a list of
+jobs, the agent will too. A run that lands on a page with no postings says so, and names
+the page it read.
+
+### Forms with more than one page
+
+Most application forms outside Greenhouse are wizards: contact details, then
+work history, then eligibility questions, each behind a **Next**. The agent
+walks them. It reads whichever step is on screen, fills what it can, finds the
+control that goes forward, presses it, and reads the next one. Nothing about
+the sequence is built in — each step is discovered by reading the page as it
+arrives, which is what makes it work on a form nobody wrote a connector for.
+
+The tray shows how far it got: "Walked 4 steps of this form", with what was
+filled on each and which button moved it on.
+
+It stops, deliberately, in four places:
+
+| It stops when | Because |
+|---|---|
+| The next control is **Submit** | Pressing that is yours. The form is left filled and open. |
+| A **required question** has no answer | Clicking past one either trips validation or sends a blank the employer reads. |
+| The page **stops changing** | A Next that does not advance means a validation message the agent cannot see. Retrying is how a filler submits the same broken step forty times. |
+| A **CAPTCHA or sign-in wall** appears | Both are yours to clear. |
+
+It never presses Back, Cancel, or *Create an account* — those lose what has
+been typed or start a different flow.
+
+### Answering the same question fifteen times
+
+Every form asks for your country, your notice period, your work authorisation. Answer
+them on one application, leave **"save these answers"** ticked, and they are written onto
+every other application waiting in the tray — marked *Your earlier answer* so you can see
+where they came from and change any you disagree with. The same thing happens again when
+an application is submitted.
+
+Two things are never carried: a question already answered on that application, and an
+answer that is not one of the choices the other form offers. A question naming the
+employer ("Have you previously worked at GitLab?") only ever matches that same employer's
+forms, so a company-specific answer cannot end up on someone else's application.
+
+Applications prepared from a resume you have since replaced are hidden from
+the tray, and it says how many. Releasing one would send a document written
+from a resume you have moved away from; prepare those postings again to use the
+current one.
+
+Answers you saved before this existed are not lost — **Use my saved answers** at the top
+of the tray applies the whole backlog in one go.
 
 ---
 

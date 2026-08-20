@@ -16,7 +16,9 @@ The generic connector uses:
 - Email detection for jobs that only accept email applications
 """
 
+import html
 import logging
+import re
 from typing import List, Optional, Dict, Any, TYPE_CHECKING
 from urllib.parse import quote_plus, urljoin, urlparse
 
@@ -134,10 +136,22 @@ class GenericATSConnector(ConnectedPlatformConnector):
             can_filter=True,
             can_read_details=True,
             can_start_application=True,
-            can_fill_standard_fields=False,  # Phase 3+
-            can_upload_documents=False,  # Phase 3+
-            can_process_custom_questions=False,  # Phase 3+
-            can_submit_automatically=False,  # Phase 3+
+            # These were left False with a "Phase 3+" note from before the
+            # filler existed, and never turned on when it did. The connector
+            # has had `fill_application` — reading the form, filling what the
+            # profile knows, attaching the tailored documents, deferring the
+            # rest, and now walking multi-step forms — for several phases. The
+            # stale flags meant the orchestrator tailored documents for a
+            # user-added station and then logged "cannot fill application
+            # forms", so nothing ever reached the tray from one.
+            can_fill_standard_fields=True,
+            can_upload_documents=True,
+            # Not answered *automatically* — read, classified, and deferred to
+            # the user with a drafted answer where the resume supports one.
+            can_process_custom_questions=True,
+            # Stays false, and is the point of the product: the agent fills
+            # the form and stops. The user releases it.
+            can_submit_automatically=False,
             requires_manual_signin=True,
             requires_manual_review_first_n=5,
             tos_risk_note="Generic connector works on public job boards only. Verify site's ToS before using.",
@@ -850,6 +864,7 @@ class GenericATSConnector(ConnectedPlatformConnector):
                 external_id="unknown",
                 title="Unable to read",
                 company="Unknown",
+                location="Not specified",
                 description="Page not accessible",
             )
         
@@ -885,13 +900,18 @@ class GenericATSConnector(ConnectedPlatformConnector):
             )
         
         except Exception as e:
-            logger.error(f"Error reading job details: {e}")
+            logger.error(
+                f"Error reading job details from {job_url}: "
+                f"{type(e).__name__}: {e}",
+                exc_info=True,
+            )
             return JobPosting(
                 platform=self.platform_name,
                 external_id="unknown",
                 title="Error",
                 company="Unknown",
-                description=f"Error reading job: {str(e)}",
+                location="Not specified",
+                description=f"Error reading job: {type(e).__name__}: {e}",
                 apply_url=job_url,
             )
     
@@ -939,7 +959,7 @@ class GenericATSConnector(ConnectedPlatformConnector):
                 company=self._scalar(job_data.get("hiringOrganization"), "name") or "Unknown",
                 location=self._extract_location(job_data.get("jobLocation", {})),
                 job_type=self._normalize_job_type(job_data.get("employmentType", "full_time")),
-                description=self._scalar(job_data.get("description")) or "",
+                description=_as_plain_text(self._scalar(job_data.get("description"))),
                 requirements=self._scalar(job_data.get("applicantLocationRequirements")) or "",
                 salary=self._extract_salary(job_data.get("baseSalary", {})),
                 posted_at=self._scalar(job_data.get("datePosted")) or "",
@@ -994,6 +1014,11 @@ class GenericATSConnector(ConnectedPlatformConnector):
             return GenericATSConnector._find_job_posting(data["item"])
 
         return None
+
+    @staticmethod
+    def _plain_text(value: Optional[str]) -> str:
+        """Exposed for tests; see `_as_plain_text`."""
+        return _as_plain_text(value)
 
     @staticmethod
     def _scalar(value: Any, key: Optional[str] = None) -> Optional[str]:
@@ -1304,23 +1329,53 @@ class GenericATSConnector(ConnectedPlatformConnector):
             await self._settle()
 
         # If there's no form here yet, look for the apply control
-        if not await self._has_form_fields():
-            if await self._click_first(self.selectors["apply_button"]):
-                await self._settle()
-                logger.info(f"Followed the apply control to {self._page.url}")
+        # Follow the page's own apply controls, hop by hop, rather than
+        # looking once and giving up. On an aggregator the posting page never
+        # has a form: "Quick Apply" goes to the ATS behind it, which may open
+        # a new tab and take twenty seconds to render. See `apply_route`.
+        from job_agent.services.apply_route import ApplyRouteFinder
+
+        route = await ApplyRouteFinder().find(
+            self._page, getattr(self._page, "context", None)
+        )
+
+        # The walk may have ended on a different tab. Everything downstream
+        # fills and screenshots through self._page, so follow it there.
+        if route.page is not None and route.page is not self._page:
+            self._page = route.page
+
+        reachable = route.reached_an_application
 
         return ApplicationSession(
             job=job,
             platform_account_id=0,  # Set by the caller
             form_url=self._page.url,
+            form_state={
+                "application_form_found": reachable,
+                "apply_route": route.to_dict(),
+                "posting_expired": route.expired,
+                "reason": "" if reachable else route.describe(),
+            },
         )
 
     async def _has_form_fields(self) -> bool:
-        """True if the current page shows any fillable input."""
+        """
+        Whether this page is showing an application form.
+
+        "Any input exists" is not the test, and using it was a real failure:
+        every job board's own header carries a search box, so a posting page
+        with no application form on it looked fillable. The agent duly queued
+        an application whose one filled field was SimplyHired's *"City, State,
+        ZIP or Remote"* search box, set to the candidate's country.
+
+        An application form asks for a person: their name, their email, a
+        resume. That is what is looked for.
+
+        Returns:
+            True when the page is an application form
+        """
         try:
-            return await self._page.locator(
-                "input:not([type=hidden]):not([type=submit]), select, textarea"
-            ).count() > 0
+            return bool(await self._page.evaluate(_LOOKS_LIKE_AN_APPLICATION_JS))
         except Exception:
             return False
 
@@ -1361,7 +1416,11 @@ class GenericATSConnector(ConnectedPlatformConnector):
             screenshots_dir=package.get("screenshots_dir"),
         )
 
-        outcome = await filler.fill_form(
+        # The whole application, not just the screen in front of it. Most
+        # boards outside Greenhouse are wizards, and filling only step one
+        # reported an application as ready when four screens had never been
+        # read.
+        outcome = await filler.fill_application(
             self._page,
             candidate_profile,
             documents={
@@ -1382,6 +1441,10 @@ class GenericATSConnector(ConnectedPlatformConnector):
             "errors": outcome.errors,
             "needs_user_input": outcome.needs_user_input,
             "required_unanswered": outcome.required_deferred,
+            # How the form was walked: the steps read, what was pressed to
+            # advance, and where it stopped. The user needs this to know
+            # whether "filled" means one screen or five.
+            "walk": outcome.walk,
             "form_url": self._page.url,
         }
 
@@ -1442,3 +1505,90 @@ class GenericATSConnector(ConnectedPlatformConnector):
                 else "Submitted, but no confirmation could be found on the page"
             ),
         )
+
+
+def _as_plain_text(value: Optional[str]) -> str:
+    """
+    Turn a schema.org description into readable text.
+
+    JSON-LD carries the description as an HTML fragment, and it was being
+    stored verbatim: "<div><p>Career paths start between $14.50…". That HTML
+    then reached three places it had no business being — the fit analyser,
+    which scored `<b>` and `<br>` as content words; the tailoring prompt, where
+    it wasted a small model's context on markup; and the posting the user reads
+    in the tray.
+
+    Block-level tags become line breaks so the structure of a posting — its
+    headings, its bullet list of requirements — survives as plain text, which
+    is what the requirement extractor needs to find them.
+
+    Args:
+        value: A description, possibly HTML
+
+    Returns:
+        Plain text, empty when there was nothing
+    """
+    if not value:
+        return ""
+
+    text = value
+
+    if "<" not in text:
+        return text.strip()
+
+    # Block boundaries first, so paragraphs and list items do not run together
+    # into one unreadable line.
+    text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", text)
+    text = re.sub(r"(?i)</\s*(p|div|li|tr|h[1-6]|ul|ol|table|section)\s*>", "\n", text)
+    text = re.sub(r"(?i)<\s*li[^>]*>", "• ", text)
+
+    # Everything else is presentational.
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+
+    # Collapse the whitespace the tags left behind, keeping paragraph breaks.
+    text = re.sub(r"[ \t\xa0]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return text.strip()
+
+
+# Whether the page in front of us is an application form rather than a posting
+# with the board's own search box in its header.
+#
+# Two independent signals, either of which is enough: a field that asks for
+# something only an applicant supplies (name, email, phone, resume), or a
+# control that says it submits an application.
+_LOOKS_LIKE_AN_APPLICATION_JS = """
+() => {
+  const APPLICANT = /first.?name|last.?name|full.?name|your name|e-?mail|phone|resume|cv\b|cover.?letter|linkedin|portfolio/i;
+  const SEARCHY = /search|keyword|city, state|zip|location|job title, skills/i;
+
+  const fields = Array.from(
+    document.querySelectorAll('input:not([type=hidden]):not([type=submit]):not([type=button]), select, textarea')
+  ).filter(e => {
+    const box = e.getBoundingClientRect();
+    return box.width > 0 && box.height > 0;
+  });
+
+  const describes = (e) => [
+    e.name, e.id, e.placeholder, e.getAttribute('aria-label'),
+    (e.labels && e.labels[0] && e.labels[0].textContent) || ''
+  ].filter(Boolean).join(' ');
+
+  const applicant = fields.filter(e => {
+    const text = describes(e);
+    return APPLICANT.test(text) && !SEARCHY.test(text);
+  });
+
+  if (applicant.length >= 2) return true;
+
+  const submits = Array.from(
+    document.querySelectorAll('button, input[type=submit], [role=button]')
+  ).some(e => /submit application|apply now|submit your application|send application/i
+      .test((e.innerText || e.value || '')));
+
+  return applicant.length >= 1 && submits;
+}
+"""

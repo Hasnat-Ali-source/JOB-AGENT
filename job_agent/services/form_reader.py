@@ -55,8 +55,46 @@ _EXTRACT_FIELDS_JS = """
         return parentSel + ' > ' + el.tagName.toLowerCase() + ':nth-of-type(' + index + ')';
     };
 
+    // The question a group of choices belongs to, which is never the text
+    // beside any one choice. Indeed's SmartApply wraps each employer question
+    // in <fieldset role="radiogroup"> with the question in its <legend>, and
+    // gives every radio its own <label> reading "Yes" or "No" — so reading the
+    // input's own label reported an employer's SMS-consent question as a
+    // question called "No". A wrong question text is worse than none: it is
+    // what the answer is filed under, so nothing the user answers would ever
+    // carry to the next employer asking the same thing.
+    const groupLabelFor = (el) => {
+        const fieldset = el.closest('fieldset');
+        if (fieldset) {
+            const legend = fieldset.querySelector(':scope > legend');
+            if (legend && legend.innerText.trim()) return legend.innerText.trim();
+        }
+        const group = el.closest('[role="radiogroup"], [role="group"]');
+        if (group) {
+            const id = group.getAttribute('aria-labelledby');
+            if (id) {
+                const text = id.split(/\s+/)
+                    .map(x => document.getElementById(x))
+                    .filter(Boolean)
+                    .map(n => n.innerText.trim())
+                    .filter(Boolean)
+                    .join(' ');
+                if (text) return text;
+            }
+            const aria = group.getAttribute('aria-label');
+            if (aria && aria.trim()) return aria.trim();
+        }
+        return '';
+    };
+
     // The text a person reads next to the input
     const labelFor = (el) => {
+        // For one option of a group, the group's own question comes first.
+        const type = (el.type || '').toLowerCase();
+        if (type === 'radio' || type === 'checkbox') {
+            const group = groupLabelFor(el);
+            if (group) return group;
+        }
         if (el.id) {
             const explicit = document.querySelector('label[for="' + cssEscape(el.id) + '"]');
             if (explicit && explicit.innerText.trim()) return explicit.innerText.trim();
@@ -176,7 +214,35 @@ _EXTRACT_FIELDS_JS = """
             }).filter(Boolean);
         }
 
+        // What the form already holds for this field. A step that arrives
+        // with an answer in it is not an unanswered question: Indeed's resume
+        // step opens with the user's resume already chosen, and reporting it
+        // as needing them put "Add a resume" at the top of the tray on an
+        // application that had one.
+        let answered = false;
+        let current = '';
+        if (type === 'radio' && el.name) {
+            const chosen = [...document.querySelectorAll(
+                'input[type="radio"][name="' + el.name + '"]'
+            )].find(r => r.checked);
+            if (chosen) {
+                answered = true;
+                const lbl = chosen.id
+                    ? document.querySelector('label[for="' + cssEscape(chosen.id) + '"]')
+                    : null;
+                current = (lbl ? lbl.innerText : chosen.value || '').trim();
+            }
+        } else if (type === 'checkbox') {
+            answered = el.checked;
+            current = el.checked ? 'checked' : '';
+        } else {
+            current = (el.value || '').trim();
+            answered = !!current;
+        }
+
         results.push({
+            answered: answered,
+            current: current,
             selector: selectorFor(el),
             tag: tag,
             field_type: type,
@@ -185,7 +251,14 @@ _EXTRACT_FIELDS_JS = """
             label: labelFor(el),
             placeholder: el.placeholder || '',
             aria_label: el.getAttribute('aria-label') || '',
-            required: !!el.required || el.getAttribute('aria-required') === 'true',
+            // A form need not use the `required` attribute to mean it.
+            // Indeed marks its required questions with a trailing asterisk in
+            // the legend and nowhere else, so a walk that trusted the
+            // attribute pressed Continue past an unanswered required question
+            // and only learned better when the form refused to advance.
+            required: !!el.required
+                || el.getAttribute('aria-required') === 'true'
+                || /[*\u2217]\s*$/.test((labelFor(el) || '').trim()),
             options: options,
             // Whether this control is a dropdown wearing a text input's
             // clothes. Only these are worth opening to read their choices;
@@ -260,6 +333,8 @@ class FormReader:
                 aria_label=item.get("aria_label", ""),
                 required=bool(item.get("required")),
                 options=item.get("options") or [],
+                answered=bool(item.get("answered")),
+                current=FormReader._tidy(item.get("current", "")),
             )
             for item in raw
         ]

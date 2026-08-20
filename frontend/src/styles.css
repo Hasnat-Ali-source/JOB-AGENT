@@ -517,6 +517,35 @@ a { color: inherit; text-underline-offset: 2px; }
   background: var(--blank);
 }
 
+/* The buttons that act on a row sit in the last column, and the table is
+   wider than the pane it is read in. Scrolled off the right edge they were
+   not merely awkward to reach — there was nothing on screen to suggest they
+   existed, so the wire looked like a list you could only look at. Pinning the
+   column keeps the actions in view at any width. */
+.table-wrap .register th:last-child,
+.table-wrap .register td:last-child {
+  position: sticky;
+  right: 0;
+  background: var(--blank);
+  box-shadow: -1px 0 0 var(--rule-strong);
+}
+
+.table-wrap .register th:last-child {
+  background: var(--stock);
+  z-index: 2;
+}
+
+/* A pinned cell paints over the row beneath it, so it has to repeat the
+   row's own shading — otherwise the ledger's alternating rules stop dead at
+   the pinned column and the hover highlight covers only part of the row. */
+.table-wrap .register tbody tr:nth-child(even) td:last-child {
+  background: color-mix(in srgb, var(--blank) 55%, var(--stock));
+}
+
+.table-wrap .register tbody tr:hover td:last-child {
+  background: var(--amber-wash);
+}
+
 /* ==========================================================================
    Layout helpers
    ========================================================================== */

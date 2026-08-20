@@ -103,10 +103,13 @@ export const api = {
     return request("/documents/masters", { method: "POST", form });
   },
   activateMaster: (id) => request(`/documents/masters/${id}/activate`, { method: "POST" }),
+  deleteMaster: (id) => request(`/documents/masters/${id}`, { method: "DELETE" }),
   atsScore: (id) => request(`/documents/masters/${id}/ats`),
   atsImprove: (id, apply = false) =>
     request(`/documents/masters/${id}/ats/improve`, { method: "POST", query: { apply } }),
   fitReport: (jobId) => request(`/documents/fit/${jobId}`),
+  resyncPipeline: () =>
+    request("/documents/masters/resync", { method: "POST" }),
   prepareApplication: (jobId) =>
     request(`/jobs/${jobId}/prepare`, { method: "POST" }),
   resumeMatch: (profileId) =>
@@ -139,17 +142,29 @@ export const api = {
   // Review queue — the product's centre of gravity
   queue: (status = "queued_for_review") => request("/review", { query: { status } }),
   review: (id) => request(`/review/${id}`),
+  readMyAnswers: (id, rememberSensitive = false) =>
+    request(`/review/${id}/read-my-answers`, {
+      method: "POST",
+      query: { remember_sensitive: rememberSensitive },
+    }),
   answer: (id, answers, remember = true, rememberSensitive = false) =>
     request(`/review/${id}/answers`, {
       method: "POST",
       body: { answers, remember, remember_sensitive: rememberSensitive },
     }),
+  applySavedAnswers: () =>
+    request("/review/apply-saved-answers", { method: "POST" }),
   approve: (id, notes) => request(`/review/${id}/approve`, { method: "POST", body: { notes } }),
   discard: (id, reason) => request(`/review/${id}/discard`, { method: "POST", body: { reason } }),
   eligibility: (id) => request(`/review/${id}/eligibility`),
   analysis: (id) => request(`/review/${id}/analysis`),
   // Rebuilds the tailored documents and attaches the new ones. Clears the
   // approval: what was approved is not what would now be sent.
+  fitDocumentsToJob: (id) =>
+    request(`/review/${id}/regenerate-documents`, {
+      method: "POST",
+      query: { fit_to_posting: true },
+    }),
   regenerateDocuments: (id) =>
     request(`/review/${id}/regenerate-documents`, { method: "POST" }),
   // acceptWeakFit waives the one finding that is a judgement rather than a

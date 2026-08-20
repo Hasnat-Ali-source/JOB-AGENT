@@ -73,12 +73,49 @@ export default function OutgoingTray({ toast, onNavigate }) {
   const needingAnswers = items.filter((item) => item.required_unanswered.length > 0);
   const ready = items.filter((item) => item.required_unanswered.length === 0);
 
+  // Answers are carried onto the other blanks as soon as one is saved. Blanks
+  // prepared before that started still ask questions the user has answered
+  // elsewhere, and this is the one action that clears them.
+  const applySaved = async () => {
+    try {
+      const result = await api.applySavedAnswers();
+      toast(result.message, result.answers_filled ? "olive" : "amber");
+      queue.reload();
+    } catch (error) {
+      toast(error.message, "red");
+    }
+  };
+
   return (
     <>
+      {/* Applications built from a resume no longer in use are hidden, not
+          lost. Saying so is the point: after switching resume the tray would
+          otherwise look as though work had disappeared. */}
+      {queue.data?.hidden_from_earlier_resumes ? (
+        <Notice tone="amber" title="Not shown here">
+          {queue.data.hidden_from_earlier_resumes} application
+          {queue.data.hidden_from_earlier_resumes === 1 ? " was" : "s were"} prepared
+          from an earlier resume and {queue.data.hidden_from_earlier_resumes === 1 ? "is" : "are"}{" "}
+          hidden. Releasing one would send a document written from a resume you have
+          moved away from. Prepare those postings again to use{" "}
+          {queue.data.resume_in_use || "the resume in use"}.
+        </Notice>
+      ) : null}
+
       <SectionHead
         title="Outgoing tray"
         hint={`${items.length} prepared · ${needingAnswers.length} need you · ${ready.length} ready to release`}
-      />
+      >
+        {needingAnswers.length > 0 ? (
+          <button
+            className="btn btn--sm"
+            onClick={applySaved}
+            title="Fill every blank question these forms have already been answered elsewhere"
+          >
+            Use my saved answers
+          </button>
+        ) : null}
+      </SectionHead>
 
       <div className="stack">
         {needingAnswers.map((item) => (
@@ -138,6 +175,7 @@ function Blank({ summary, open, onToggle, onChanged, toast }) {
           <span className="record muted">
             <span className="label" style={{ display: "inline" }}>Filled </span>
             {summary.filled_count} fields
+            {summary.form_steps > 1 ? ` across ${summary.form_steps} steps` : ""}
           </span>
           <span className="record muted">
             <span className="label" style={{ display: "inline" }}>Deferred </span>
@@ -212,14 +250,39 @@ function BlankDetail({ id, onChanged, toast }) {
     if (!Object.keys(pending).length) return true;
 
     try {
-      await api.answer(id, pending, true, keepSensitive);
+      const result = await api.answer(id, pending, true, keepSensitive);
       setAnswers({});
       detail.reload();
+
+      // The same fifteen questions are on every form in the tray. When an
+      // answer lands on the others too, say so — silently filling them looks
+      // identical to not having saved anything.
+      const carried = result?.carried_to_other_applications;
+      if (carried?.message) {
+        toast(carried.message, "olive");
+        onChanged();
+      }
+
       return true;
     } catch (error) {
       toast(error.message, "red");
       return false;
     }
+  };
+
+  // When the agent stops on a question it will not answer, the user carries on
+  // in the open window. Those answers were invisible here — the tray kept
+  // asking, and the agent kept not remembering, because nothing ever read them
+  // back off the page the user had just filled in.
+  const readMyAnswers = async () => {
+    const result = await api.readMyAnswers(id, keepSensitive);
+    detail.reload();
+    onChanged();
+
+    const carried = result?.carried_to_other_applications;
+    if (carried?.message) toast(carried.message, "olive");
+
+    return result?.message || "Read your answers from the window";
   };
 
   const act = async (fn, successMessage, tone = "olive") => {
@@ -267,6 +330,17 @@ function BlankDetail({ id, onChanged, toast }) {
                 result.analysis.ready
                   ? "New documents attached — read them and approve again"
                   : "New documents attached, and the analyst still has objections",
+            )
+          }
+          onFit={() =>
+            act(
+              () => api.fitDocumentsToJob(id),
+              // The builder records what the rewrite was worth — "Fit 54% →
+              // 91%" — and that is the whole point of pressing this rather
+              // than plain regeneration.
+              (result) =>
+                result.tailoring_notes?.[0] ||
+                "Documents rewritten for this posting",
             )
           }
         />
@@ -361,6 +435,49 @@ function BlankDetail({ id, onChanged, toast }) {
         </section>
       ) : null}
 
+      {/* How much of a multi-step form the agent actually got through.
+          "Filled 16 fields" reads the same whether that was the whole
+          application or the first screen of five. */}
+      {data.walk && data.walk.step_count > 1 ? (
+        <details className="fold">
+          <summary>{data.walk.message}</summary>
+          <div className="fold__body">
+            <table className="register">
+              <thead>
+                <tr>
+                  <th>Step</th>
+                  <th data-numeric>Filled</th>
+                  <th data-numeric>Deferred</th>
+                  <th>Moved on by</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.walk.steps.map((step) => (
+                  <tr key={step.step}>
+                    <td>{step.step}</td>
+                    <td data-numeric>{step.fields_filled}</td>
+                    <td data-numeric>{step.fields_deferred}</td>
+                    <td className="muted">{step.advanced_by || "— last step"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {data.walk.final_control ? (
+              <p className="muted" style={{ fontSize: 12.5, marginTop: "0.5rem" }}>
+                The last control on this form is “{data.walk.final_control}”. The agent
+                filled up to it and stopped; releasing presses it.
+              </p>
+            ) : null}
+          </div>
+        </details>
+      ) : null}
+
+      {data.walk?.needs_user ? (
+        <Notice tone="amber" title="The agent stopped part-way through this form">
+          {data.walk.stopped_because}
+        </Notice>
+      ) : null}
+
       {/* The posting this was written against */}
       {data.job ? (
         <details className="fold">
@@ -430,6 +547,15 @@ function BlankDetail({ id, onChanged, toast }) {
           onClick={() => act(saveAnswers, () => "Answers recorded")}
         >
           Save answers
+        </button>
+
+        <button
+          className="btn btn--sm"
+          disabled={busy}
+          onClick={() => act(readMyAnswers, (message) => message)}
+          title="Read the answers you typed into the open browser window, and keep them for the next form that asks"
+        >
+          Read my answers from the window
         </button>
 
         <span className="spacer" />
@@ -505,7 +631,7 @@ function BlankDetail({ id, onChanged, toast }) {
  * they never opened — everything that was wrong with it was knowable, and
  * nothing put it in front of them.
  */
-function AnalysisPanel({ analysis, busy, onRegenerate }) {
+function AnalysisPanel({ analysis, busy, onRegenerate, onFit }) {
   const blockers = analysis.blockers || [];
   const warnings = analysis.warnings || [];
   const defects = blockers.filter((finding) => !finding.overridable);
@@ -540,7 +666,7 @@ function AnalysisPanel({ analysis, busy, onRegenerate }) {
             fixed. Most are fixed by writing the documents again.
           </div>
           {onRegenerate ? (
-            <div style={{ marginTop: "0.5rem" }}>
+            <div className="row" style={{ marginTop: "0.5rem", gap: "0.4rem" }}>
               <button className="btn btn--sm" disabled={busy} onClick={onRegenerate}>
                 Rewrite and re-attach the documents
               </button>
@@ -556,6 +682,21 @@ function AnalysisPanel({ analysis, busy, onRegenerate }) {
             This is a judgement about odds, not a defect. Release anyway if you
             disagree — the decision is recorded.
           </div>
+          {onFit ? (
+            <div style={{ marginTop: "0.5rem" }}>
+              <button className="btn btn--sm" disabled={busy} onClick={onFit}>
+                Fit my documents to this posting
+              </button>
+              <div className="muted" style={{ fontSize: 12, marginTop: "0.3rem" }}>
+                Reframes your summary and rewords every passage into this
+                employer's language, keeping each change only where it actually
+                raises the score. It cannot write in experience your resume does
+                not have — where a posting names a technology you have never
+                used, that gap is what is left, and a closer posting is the
+                better move.
+              </div>
+            </div>
+          ) : null}
         </Notice>
       ))}
 

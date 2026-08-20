@@ -38,16 +38,33 @@ class TestGenericATSConnector:
         assert isinstance(connector.capabilities, PlatformCapabilities)
     
     def test_capabilities(self):
-        """Test connector capabilities are set correctly."""
+        """
+        Test connector capabilities are set correctly.
+
+        The fill flags were left False with a "Phase 3+" note from before the
+        filler existed and never turned on when it did — so the orchestrator
+        tailored documents for a user-added station and then logged "cannot
+        fill application forms", and nothing ever reached the tray from one.
+        """
         connector = GenericATSConnector()
-        
+
         assert connector.capabilities.can_search is True
         assert connector.capabilities.can_filter is True
         assert connector.capabilities.can_read_details is True
         assert connector.capabilities.can_start_application is True
-        assert connector.capabilities.can_fill_standard_fields is False
-        assert connector.capabilities.can_submit_automatically is False
+        assert connector.capabilities.can_fill_standard_fields is True
+        assert connector.capabilities.can_upload_documents is True
+        assert connector.capabilities.can_process_custom_questions is True
         assert connector.capabilities.requires_manual_signin is True
+
+    def test_it_never_claims_it_can_submit(self):
+        """
+        The one capability that must stay off.
+
+        The agent fills the form and stops; releasing it is the user's act,
+        and that promise is what the whole product rests on.
+        """
+        assert GenericATSConnector().capabilities.can_submit_automatically is False
     
     def test_inherits_from_base(self):
         """Test connector extends ConnectedPlatformConnector."""

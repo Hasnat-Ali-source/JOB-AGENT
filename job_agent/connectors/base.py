@@ -87,7 +87,12 @@ class JobPosting:
     external_id: str  # Platform's job ID
     title: str
     company: str
-    location: str
+    # Defaulted deliberately. Plenty of postings state no location at all, and
+    # requiring one meant every fallback path that omitted it raised
+    # TypeError — including the *exception handler*, so a failure to read one
+    # SimplyHired posting surfaced as "missing 1 required positional argument:
+    # 'location'" and the real cause was never logged.
+    location: str = "Not specified"
     job_type: Optional[str] = None  # "full_time", "part_time", "contract"
     seniority: Optional[str] = None  # "entry", "mid", "senior", "staff"
     description: str = ""  # Full job description

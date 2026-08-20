@@ -328,7 +328,11 @@ class TestAddStationEndpoint:
     def test_a_public_board_is_searchable_at_once(self, client):
         response = client.post(
             "/api/v1/accounts/custom",
-            json={"name": "Acme careers", "url": "https://acme.test/careers"},
+            json={
+                "name": "Acme careers",
+                "url": "https://acme.test/careers",
+                "find_listings_page": False,
+            },
         )
 
         assert response.status_code == 200
@@ -352,7 +356,11 @@ class TestAddStationEndpoint:
     def test_the_station_is_wired_to_the_generic_connector(self, client):
         client.post(
             "/api/v1/accounts/custom",
-            json={"name": "Acme careers", "url": "https://acme.test/careers"},
+            json={
+                "name": "Acme careers",
+                "url": "https://acme.test/careers",
+                "find_listings_page": False,
+            },
         )
 
         account = (
@@ -364,26 +372,69 @@ class TestAddStationEndpoint:
         assert account.connector_kind == "generic_ats"
         assert account.search_url == "https://acme.test/careers"
 
-    def test_a_url_without_a_scheme_is_refused(self, client):
+    def test_a_url_without_a_scheme_is_accepted(self, client):
+        """
+        A bare domain is the most natural thing to paste, and refusing it for
+        want of "https://" taught the user nothing they could act on.
+        """
         response = client.post(
             "/api/v1/accounts/custom",
-            json={"name": "Acme", "url": "acme.test/careers"},
+            json={
+                "name": "Acme",
+                "url": "acme.test/careers",
+                "find_listings_page": False,
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["search_url"] == "https://acme.test/careers"
+
+    def test_something_that_is_not_a_web_address_is_refused(self, client):
+        response = client.post(
+            "/api/v1/accounts/custom",
+            json={"name": "Acme", "url": "not a url", "find_listings_page": False},
         )
 
         assert response.status_code == 400
-        assert "http" in response.json()["detail"]
+
+    def test_the_listings_walk_is_reported_back(self, client):
+        """
+        The user has to be able to see which page the station will read — the
+        alternative is discovering it was the homepage after an empty run.
+        """
+        response = client.post(
+            "/api/v1/accounts/custom",
+            json={
+                "name": "Acme careers",
+                "url": "https://acme.test/careers",
+                "find_listings_page": False,
+            },
+        )
+
+        landed = response.json()["listings_page"]
+
+        assert landed["url"] == "https://acme.test/careers"
+        assert landed["as_given"] is True
 
     def test_a_built_in_platform_cannot_be_shadowed(self, client):
         """Naming a station 'linkedin' would quietly displace the real connector."""
         response = client.post(
             "/api/v1/accounts/custom",
-            json={"name": "LinkedIn", "url": "https://linkedin.test/jobs"},
+            json={
+                "name": "LinkedIn",
+                "url": "https://linkedin.test/jobs",
+                "find_listings_page": False,
+            },
         )
 
         assert response.status_code == 409
 
     def test_the_same_station_cannot_be_added_twice(self, client):
-        payload = {"name": "Acme careers", "url": "https://acme.test/careers"}
+        payload = {
+            "name": "Acme careers",
+            "url": "https://acme.test/careers",
+            "find_listings_page": False,
+        }
 
         assert client.post("/api/v1/accounts/custom", json=payload).status_code == 200
         assert client.post("/api/v1/accounts/custom", json=payload).status_code == 409
@@ -391,7 +442,11 @@ class TestAddStationEndpoint:
     def test_a_name_with_no_letters_is_refused(self, client):
         response = client.post(
             "/api/v1/accounts/custom",
-            json={"name": "!!!", "url": "https://acme.test/careers"},
+            json={
+                "name": "!!!",
+                "url": "https://acme.test/careers",
+                "find_listings_page": False,
+            },
         )
 
         assert response.status_code == 400

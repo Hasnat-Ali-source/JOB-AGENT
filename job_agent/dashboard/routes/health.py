@@ -273,12 +273,23 @@ async def resume_platform(
     result = await SessionMonitor(session).resume(account)
 
     if not result["resumed"]:
+        # "Reconnect it first" is useless advice when the station never needed
+        # an account. A public job board cannot show a sign-out control, so it
+        # can never prove it has a session, and reconnecting will fail exactly
+        # the same way for ever. Say which of the two situations this is.
+        remedy = "Reconnect it first."
+
+        if account.requires_signin:
+            remedy = (
+                "Sign in through Reconnect if this site really does need an "
+                "account. If its listings are public — most job boards are — "
+                "untick 'This station needs me to sign in' on the card and it "
+                "comes back on line immediately."
+            )
+
         raise HTTPException(
             status_code=409,
-            detail=(
-                f"{platform} still isn't usable: {result['reason']}. "
-                f"Reconnect it first."
-            ),
+            detail=f"{platform} still isn't usable: {result['reason']}. {remedy}",
         )
 
     return result

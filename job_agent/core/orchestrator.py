@@ -32,6 +32,7 @@ from job_agent.config import settings
 from job_agent.connectors import create_connector_for_account
 from job_agent.core.search_pipeline import SearchPipeline
 from job_agent.models.database import (
+    ApplyStrategy,
     AgentRun,
     AuditAction,
     AuditLog,
@@ -167,6 +168,12 @@ class RunOrchestrator:
         Returns:
             A human-readable reason, or None to run it
         """
+        # The user's own "not this one, for now". Deliberately checked before
+        # every other reason: a paused station should read as paused, not as
+        # broken, however its session happens to be.
+        if getattr(account, "paused", False):
+            return "paused by you — start it again under Stations"
+
         if account.status == ConnectionStatus.DISABLED:
             return "platform is disabled"
 
@@ -395,8 +402,27 @@ class RunOrchestrator:
                         if job.id not in already_seen
                     ]
 
-            if generate_documents and eligible:
+            # A station that supplies its own documents gets none written for
+            # it. Indeed SmartApply and LinkedIn Easy Apply send the profile's
+            # own resume whatever is attached here, so tailoring for them is
+            # work nobody reads — and it made every application on those
+            # boards several minutes slower for nothing.
+            writes_documents = (
+                getattr(account, "apply_strategy", ApplyStrategy.TAILORED)
+                != ApplyStrategy.PLATFORM_PROFILE
+            )
+
+            if generate_documents and eligible and writes_documents:
                 outcome.documents_generated = await self._generate_documents(eligible)
+            elif generate_documents and eligible:
+                logger.info(
+                    f"{account.platform} applies from its own profile — "
+                    f"skipping document tailoring for {len(eligible)} job(s)"
+                )
+                outcome.errors.append(
+                    f"{account.platform}: applies with the resume held on the "
+                    f"platform, so no documents were tailored"
+                )
 
             # Queue against the eligible jobs, not against how many documents
             # this run happened to write: a job documented by an earlier run
@@ -546,7 +572,16 @@ class RunOrchestrator:
             Number of applications queued
         """
         from job_agent.models.database import CandidateProfile, DocumentType, DocumentVersion
-        from job_agent.services.application_filler import ApplicationFiller
+
+        # Whether this station wants documents attached at all.
+        platform_supplies_documents = (
+            getattr(account, "apply_strategy", ApplyStrategy.TAILORED)
+            == ApplyStrategy.PLATFORM_PROFILE
+        )
+        from job_agent.services.application_filler import (
+            ApplicationFiller,
+            FillOutcome,
+        )
 
         connector = create_connector_for_account(account)
 
@@ -608,13 +643,49 @@ class RunOrchestrator:
             try:
                 documents = self._documents_for(job)
 
-                if not documents.get("resume"):
+                # A station that applies from the board's own profile has no
+                # tailored documents by design — SimplyHired carries the user's
+                # Indeed resume, and writing one to attach would be work
+                # nothing consumes. Requiring one here skipped every job on
+                # such a station, queued nothing, and recorded no reason for
+                # it: the tray stayed empty and "Prepare" reported "the form
+                # could not be filled: no reason reported".
+                if not documents.get("resume") and not platform_supplies_documents:
                     logger.info(f"No tailored resume for job {job.id}; skipping")
+                    outcome.errors.append(
+                        f"{job.title}: no tailored resume was written for this "
+                        f"posting, so there was nothing to attach"
+                    )
                     continue
 
                 posting = self._posting_for(job)
 
                 app_session = await connector.begin_application(posting)
+
+                # Checked here, before `fill_application` replaces form_state
+                # with its own dict. An aggregator's posting page often has no
+                # application form at all — the apply route is behind a
+                # sign-in or on the employer's own site — and filling one
+                # produced an application whose single field was the board's
+                # own search box, set to the candidate's country.
+                if not (app_session.form_state or {}).get(
+                    "application_form_found", True
+                ):
+                    state = app_session.form_state or {}
+                    reason = state.get("reason", "")
+
+                    # An expired posting is not a failure to find a form — it
+                    # is a job that is gone, and leaving it on the wire means
+                    # the user keeps trying it.
+                    if state.get("posting_expired"):
+                        job.status = "expired"
+                        job.hard_filter_pass = False
+                        self.db_session.commit()
+                        logger.info(f"Job {job.id} has expired — closed on the wire")
+
+                    logger.info(f"No application form for job {job.id}: {reason}")
+                    outcome.errors.append(f"{job.title}: {reason}")
+                    continue
 
                 # An application form is a natural place to meet a challenge.
                 # Two very different things look alike here: a wall standing
@@ -653,23 +724,38 @@ class RunOrchestrator:
                 )
 
                 if needs_challenge:
-                    # Surfaced as an unanswered required question, so the tray
-                    # blocks release until the user has dealt with it.
-                    state = app_session.form_state or {}
-                    state.setdefault("required_unanswered", []).append(
-                        "Complete the “I'm not a robot” check on the form yourself "
-                        "before submitting — the agent will not do it for you."
-                    )
-                    app_session.form_state = state
+                    # Surfaced as a deferred *field* rather than appended to a
+                    # list on form_state: `required_deferred` is computed from
+                    # the deferred fields, so anything added only to the list
+                    # vanished the moment the outcome was rebuilt properly.
+                    # As a field it also renders in the tray with the others.
+                    challenge = dict(app_session.deferred_fields or {})
+                    challenge["Complete the “I'm not a robot” check"] = {
+                        "required": True,
+                        "category": "sensitive",
+                        "reason": (
+                            "This form is showing a CAPTCHA. Complete it "
+                            "yourself in the open window before releasing — "
+                            "the agent will not do it for you."
+                        ),
+                    }
+                    app_session.deferred_fields = challenge
 
-                fill_outcome = type("Outcome", (), {
-                    "filled_fields": app_session.filled_fields,
-                    "deferred_fields": app_session.deferred_fields,
-                    "screenshot_path": app_session.screenshot_path,
-                    "errors": (app_session.form_state or {}).get("errors", []),
-                    "required_deferred": (app_session.form_state or {}).get(
-                        "required_unanswered", []),
-                })()
+                # A real FillOutcome rather than an ad-hoc object: this is
+                # handed to `queue_for_review`, which reads every field on it,
+                # and an anonymous type silently lacks whatever gets added to
+                # the dataclass next. It already cost one release — the walk
+                # record was added and this raised "'Outcome' object has no
+                # attribute 'walk'" on every queued application.
+                form_state = app_session.form_state or {}
+
+                fill_outcome = FillOutcome(
+                    filled_fields=app_session.filled_fields or {},
+                    deferred_fields=app_session.deferred_fields or {},
+                    screenshot_path=app_session.screenshot_path,
+                    errors=form_state.get("errors", []),
+                    walk=form_state.get("walk"),
+                )
 
                 resume_version = self.db_session.query(DocumentVersion).filter(
                     DocumentVersion.job_id == job.id,

@@ -17,6 +17,7 @@ running agent shouldn't be able to lower its own safety threshold through an
 API call.
 """
 
+import html
 import logging
 from datetime import timedelta
 from typing import Optional
@@ -31,9 +32,11 @@ from job_agent.config import settings
 from job_agent.dashboard.deps import get_session
 from job_agent.models.database import (
     Application,
+    ApplyStrategy,
     AuditAction,
     AuditLog,
     AutomationMode,
+    ConnectionStatus,
     Job,
     PlatformAccount,
 )
@@ -384,7 +387,46 @@ async def update_platform_settings(
             )
 
     if "search_url" in payload:
-        account.search_url = payload["search_url"] or None
+        # A URL copied out of a page's source arrives entity-encoded —
+        # "?q=remote&amp;l=london" — and the second parameter then becomes one
+        # called "amp;l", so the station searches with half its query silently
+        # dropped. Decoding on the way in is cheap and the symptom is invisible.
+        account.search_url = html.unescape(payload["search_url"]) or None
+
+    # Whether a station needs signing into is a guess made once, when it was
+    # added, and it is easy to get wrong: most consumer job boards are
+    # searchable logged out, and ticking the box strands the station in
+    # `needs_signin` for ever. There was no way to change the answer short of
+    # deleting the station and adding it again, and the error the user got
+    # ("reconnect it first") pointed at a reconnection that could never
+    # succeed. Marking a station public clears that state in one step.
+    if "paused" in payload:
+        account.paused = bool(payload["paused"])
+
+    if "apply_strategy" in payload:
+        try:
+            account.apply_strategy = ApplyStrategy(payload["apply_strategy"])
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"apply_strategy must be one of "
+                    f"{', '.join(s.value for s in ApplyStrategy)}"
+                ),
+            )
+
+    if "requires_signin" in payload:
+        account.requires_signin = bool(payload["requires_signin"])
+
+        if account.requires_signin:
+            # It may genuinely need an account. Only a real check can say
+            # whether the saved session is good, so ask for one.
+            if account.status == ConnectionStatus.CONNECTED:
+                account.status = ConnectionStatus.NEEDS_SIGNIN
+        elif account.status == ConnectionStatus.NEEDS_SIGNIN:
+            # A public board has nothing to be signed out of.
+            account.status = ConnectionStatus.CONNECTED
+            account.last_error = None
 
     account.updated_at = utcnow()
     session.commit()
@@ -398,6 +440,14 @@ async def update_platform_settings(
         "daily_apply_limit": account.daily_apply_limit,
         "daily_message_limit": account.daily_message_limit,
         "search_url": account.search_url,
+        "requires_signin": bool(account.requires_signin),
+        "paused": bool(account.paused),
+        "apply_strategy": (
+            account.apply_strategy.value
+            if hasattr(account.apply_strategy, "value")
+            else account.apply_strategy
+        ),
+        "connection_status": account.status.value if hasattr(account.status, "value") else account.status,
         "note": (
             "Submission still requires "
             f"{settings.clean_submissions_threshold} reviewed submissions on this "

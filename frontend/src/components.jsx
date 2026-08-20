@@ -57,6 +57,10 @@ export function QuerySlip({ question, detail, value, onChange, disabled }) {
   const answered = (detail?.value_entered_by_user ?? "") !== "";
   const drafted =
     !answered && (detail?.suggested_answer ?? "") !== "";
+  // Filled from what the user answered on another application. Marked rather
+  // than shown as their own answer: it is theirs, but they wrote it about a
+  // different form and should get the chance to disagree.
+  const carried = answered && detail?.carried_from_an_earlier_answer;
 
   return (
     <div className={`slip ${refused ? "slip--refused" : "slip--unmapped"}`}>
@@ -65,7 +69,8 @@ export function QuerySlip({ question, detail, value, onChange, disabled }) {
           {refused ? "The agent will not answer this" : "The agent could not map this"}
         </span>
         {detail?.required ? <Stamp label="Required" tone="red" /> : null}
-        {answered ? <Stamp label="Answered" tone="olive" /> : null}
+        {answered && !carried ? <Stamp label="Answered" tone="olive" /> : null}
+        {carried ? <Stamp label="Your earlier answer" tone="olive" /> : null}
         {drafted ? <Stamp label="Draft — check it" tone="amber" /> : null}
       </div>
 

@@ -447,7 +447,17 @@ function SearchUrlRow({ platform, toast, onSaved }) {
   // user's own. Hiding it once a URL was set left no way to correct a wrong
   // one — and pointing a station at the wrong page is the easiest mistake
   // here, because an account dashboard and a job board look alike in a URL bar.
-  if (!needsOne && !platform.is_custom && !platform.search_url) return null;
+  // Pausing applies to every station, so the row itself always renders.
+  const showUrl = needsOne || platform.is_custom || platform.search_url;
+
+  if (!showUrl) {
+    return (
+      <div style={{ padding: "0 1rem", marginTop: "0.5rem" }}>
+        <PauseSwitch platform={platform} toast={toast} onSaved={onSaved} />
+      <ApplyStrategyRow platform={platform} toast={toast} onSaved={onSaved} />
+      </div>
+    );
+  }
 
   const save = async () => {
     setBusy(true);
@@ -490,6 +500,10 @@ function SearchUrlRow({ platform, toast, onSaved }) {
         </button>
       </div>
 
+      <SignInSwitch platform={platform} toast={toast} onSaved={onSaved} />
+      <PauseSwitch platform={platform} toast={toast} onSaved={onSaved} />
+      <ApplyStrategyRow platform={platform} toast={toast} onSaved={onSaved} />
+
       {needsOne ? (
         <div style={{ marginTop: "0.5rem" }}>
           <Notice tone="amber" title="Nothing to search yet">
@@ -499,6 +513,169 @@ function SearchUrlRow({ platform, toast, onSaved }) {
         </div>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * How this station wants an application built.
+ *
+ * Not every board wants the same thing, and forcing one shape on all of them
+ * is what limited the agent. A board that holds its own resume — Indeed
+ * SmartApply behind SimplyHired, LinkedIn Easy Apply — sends that copy
+ * whatever the agent attaches, so writing a tailored PDF for it is several
+ * minutes of work nobody reads.
+ */
+function ApplyStrategyRow({ platform, toast, onSaved }) {
+  const [busy, setBusy] = useState(false);
+  const current = platform.apply_strategy || "tailored";
+
+  const change = async (event) => {
+    const value = event.target.value;
+    setBusy(true);
+    try {
+      await api.updatePlatform(platform.platform, { apply_strategy: value });
+      toast(
+        value === "tailored"
+          ? `${platform.platform} will get a resume written for each posting`
+          : `${platform.platform} will apply with the resume it already holds — no tailoring`,
+        "olive",
+      );
+      onSaved();
+    } catch (error) {
+      toast(error.message, "red");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ marginTop: "0.6rem" }}>
+      <span className="label">How to apply here</span>
+      <select
+        className="select"
+        value={current}
+        disabled={busy}
+        onChange={change}
+        style={{ marginTop: "0.25rem", fontSize: 12 }}
+      >
+        <option value="tailored">Write a resume for each posting</option>
+        <option value="platform_profile">
+          Apply with the resume this platform holds
+        </option>
+      </select>
+      <div className="muted" style={{ fontSize: 12, marginTop: "0.25rem" }}>
+        {current === "tailored"
+          ? "The agent tailors a resume and cover letter, attaches them, and holds the form for you."
+          : "No tailoring — this board sends its own copy of your resume, so writing one is wasted work."}
+      </div>
+    </div>
+  );
+}
+
+
+/**
+ * Take one station out of service without disconnecting it.
+ *
+ * A signed-in station is expensive to rebuild, so "don't use this one for
+ * now" must not mean "throw the session away". Pausing lets a run be aimed at
+ * a specific board without disconnecting the rest.
+ */
+function PauseSwitch({ platform, toast, onSaved }) {
+  const [busy, setBusy] = useState(false);
+
+  const change = async (event) => {
+    const paused = event.target.checked;
+    setBusy(true);
+    try {
+      await api.updatePlatform(platform.platform, { paused });
+      toast(
+        paused
+          ? `${platform.platform} stopped — runs will skip it until you start it again`
+          : `${platform.platform} back in service`,
+        paused ? "amber" : "olive",
+      );
+      onSaved();
+    } catch (error) {
+      toast(error.message, "red");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <label className="row" style={{ gap: "0.4rem", marginTop: "0.4rem", fontSize: 12.5 }}>
+      <input
+        type="checkbox"
+        checked={Boolean(platform.paused)}
+        disabled={busy}
+        onChange={change}
+      />
+      <span>
+        Stop using this station for now
+        {platform.paused ? (
+          <span className="muted"> — runs are skipping it, the sign-in is kept</span>
+        ) : null}
+      </span>
+    </label>
+  );
+}
+
+
+/**
+ * Whether this station has to be signed into, changeable after the fact.
+ *
+ * Ticking "needs sign-in" when a station was added is a guess, and the wrong
+ * guess was unrecoverable: a public board marked private can never prove it
+ * has a session, so it sits in `needs_signin` for ever and Resume answers
+ * "still isn't usable — reconnect it first", which is advice that cannot
+ * work. Most consumer job boards are searchable logged out; this is how you
+ * say so.
+ */
+function SignInSwitch({ platform, toast, onSaved }) {
+  const [busy, setBusy] = useState(false);
+
+  if (!platform.is_custom) return null;
+
+  const change = async (event) => {
+    const requires = event.target.checked;
+    setBusy(true);
+    try {
+      await api.updatePlatform(platform.platform, { requires_signin: requires });
+      toast(
+        requires
+          ? `${platform.platform} will ask you to sign in`
+          : `${platform.platform} marked public — it can be searched now`,
+        "olive",
+      );
+      onSaved();
+    } catch (error) {
+      toast(error.message, "red");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <label
+      className="row"
+      style={{ gap: "0.4rem", marginTop: "0.5rem", fontSize: 12.5 }}
+    >
+      <input
+        type="checkbox"
+        checked={Boolean(platform.requires_signin)}
+        disabled={busy}
+        onChange={change}
+      />
+      <span>
+        This station needs me to sign in
+        {platform.requires_signin ? (
+          <span className="muted">
+            {" "}
+            — untick if its listings are public, and it comes back on line
+          </span>
+        ) : null}
+      </span>
+    </label>
   );
 }
 
@@ -513,6 +690,10 @@ function AddStationCard({ toast, onAdded }) {
   const blank = { name: "", url: "", requires_signin: false };
   const [form, setForm] = useState(blank);
   const [busy, setBusy] = useState(false);
+  // Where the agent decided the jobs actually are. Shown after adding,
+  // because a station pointing at the wrong page is only discoverable
+  // otherwise by running a search and getting nothing back.
+  const [landed, setLanded] = useState(null);
 
   const set = (key) => (event) =>
     setForm((current) => ({
@@ -529,6 +710,7 @@ function AddStationCard({ toast, onAdded }) {
     try {
       const result = await api.addStation(form);
       toast(result.message, "olive");
+      setLanded(result.listings_page || null);
       setForm(blank);
       onAdded();
     } catch (error) {
@@ -559,14 +741,13 @@ function AddStationCard({ toast, onAdded }) {
               />
             </label>
             <label className="field">
-              <span className="field__label">Search or listings URL *</span>
+              <span className="field__label">Company website or board URL *</span>
               <input
                 className="input"
                 required
-                type="url"
                 value={form.url}
                 onChange={set("url")}
-                placeholder="https://acme.com/careers?q={query}&l={location}"
+                placeholder="acme.com"
               />
             </label>
           </div>
@@ -583,12 +764,38 @@ function AddStationCard({ toast, onAdded }) {
           </label>
 
           <Notice tone="olive">
-            Paste the page that lists the jobs. Put <code>{"{query}"}</code> and{" "}
-            <code>{"{location}"}</code> where the site's own search terms go and each run
-            fills them in from your search profile; a plain URL is read as it stands.
+            The company's own address is enough — <code>acme.com</code>. The agent
+            follows the site's careers link to the listings, and on to the Greenhouse
+            or Lever board behind it if there is one, and tells you where it landed.
+            Paste an exact board URL instead if you have one. Put{" "}
+            <code>{"{query}"}</code> and <code>{"{location}"}</code> where the site's
+            own search terms go and each run fills them in from your search profile.
             Public boards are searched straight away — tick the box above only if the
             listings are behind a login, and you'll be asked to sign in yourself.
           </Notice>
+
+          {landed ? (
+            <Notice
+              tone={landed.as_given ? "olive" : "amber"}
+              title={
+                landed.as_given
+                  ? "Station points at the URL you gave"
+                  : "Found the listings page"
+              }
+            >
+              <div>
+                Searching <code>{landed.url}</code>
+                {landed.hosted_board ? ` — a ${landed.hosted_board} board` : ""}.
+              </div>
+              {landed.how ? <div className="muted">{landed.how}.</div> : null}
+              {!landed.as_given ? (
+                <div className="muted" style={{ marginTop: "0.35rem" }}>
+                  If that is the wrong page, remove the station and add it again with
+                  the exact listings URL.
+                </div>
+              ) : null}
+            </Notice>
+          ) : null}
 
           <div className="row">
             <span className="spacer" />

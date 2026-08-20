@@ -166,6 +166,10 @@ class _Subject:
     resume: Optional[DocumentVersion] = None
     cover_letter: Optional[DocumentVersion] = None
     profile: Optional[CandidateProfile] = None
+    # A fit report computed by the caller. The semantic matcher needs to be
+    # awaited and the checks are synchronous, so `analyse_async` works it out
+    # first and hands it in. None means "work it out the lexical way".
+    fit: Optional[object] = None
 
     @property
     def resume_text(self) -> str:
@@ -214,12 +218,16 @@ class ApplicationAnalyst:
         """
         self.db_session = db_session
 
-    def analyse(self, application: Application) -> ReadinessReport:
+    def analyse(self, application: Application, fit: Optional[object] = None) -> ReadinessReport:
         """
         Judge whether an application is fit to send.
 
         Args:
             application: The application about to be submitted
+            fit: A precomputed fit report. Supplied by `analyse_async`, which
+                can await the semantic matcher; without it the fit check falls
+                back to comparing shared words, which understates a resume
+                that answers a posting in different language.
 
         Returns:
             A ReadinessReport. Never raises: a check that cannot run is
@@ -228,6 +236,7 @@ class ApplicationAnalyst:
         """
         report = ReadinessReport(application_id=application.id)
         subject = self._gather(application)
+        subject.fit = fit
 
         checks = (
             self._check_profile_ready,
@@ -269,6 +278,37 @@ class ApplicationAnalyst:
         )
 
         return report
+
+    async def analyse_async(self, application: Application) -> ReadinessReport:
+        """
+        Judge an application, matching the posting by meaning rather than
+        by shared words.
+
+        The checks themselves are synchronous and stay that way — only the fit
+        report needs a model. It is computed here and handed to `analyse`, so
+        there is one set of checks rather than two that can drift apart.
+
+        Args:
+            application: The application about to be submitted
+
+        Returns:
+            A ReadinessReport
+        """
+        from job_agent.services.fit_report import analyse_fit_async
+
+        subject = self._gather(application)
+        fit = None
+
+        if subject.resume and subject.posting_text:
+            try:
+                fit = await analyse_fit_async(subject.posting_text, subject.resume_text)
+            except Exception as e:
+                logger.info(
+                    f"Semantic fit unavailable ({type(e).__name__}: {e}) — "
+                    f"falling back to matching on shared words"
+                )
+
+        return self.analyse(application, fit=fit)
 
     # ------------------------------------------------------------------
     # Gathering
@@ -824,7 +864,7 @@ class ApplicationAnalyst:
 
         from job_agent.services.fit_report import analyse_fit
 
-        fit = analyse_fit(subject.posting_text, subject.resume_text)
+        fit = subject.fit or analyse_fit(subject.posting_text, subject.resume_text)
 
         if not fit.matches:
             return  # The posting listed no requirements to check against

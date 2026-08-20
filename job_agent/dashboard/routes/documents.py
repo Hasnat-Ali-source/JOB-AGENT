@@ -18,7 +18,16 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+)
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -29,13 +38,84 @@ from job_agent.models.database import (
     Job,
     MasterDocument,
 )
+from job_agent.models.database import SearchProfile
 from job_agent.services.document_builder import DocumentBuilder
+from job_agent.services.resume_sync import sync_to_resume
 from job_agent.utils.dates import utcnow
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/documents", tags=["documents"])
 SessionDep = get_session
+
+
+def _start_a_run_for(background_tasks: BackgroundTasks, session: Session) -> bool:
+    """
+    Kick off a search for the resume that has just come into use.
+
+    The wire empties the moment the resume changes — every posting on it was
+    found for a different one. Leaving the user to notice that and press the
+    run button themselves is the gap between "the resume drives everything"
+    and "the resume drives everything if you remember a second step". So the
+    run starts itself, in the background, and the wire refills.
+
+    Args:
+        background_tasks: FastAPI's background queue
+        session: Database session, used only to find the profile to run
+
+    Returns:
+        True if a run was queued
+    """
+    profile = (
+        session.query(SearchProfile)
+        .filter(SearchProfile.is_active == True)  # noqa: E712 — SQL comparison
+        .first()
+    )
+
+    if not profile:
+        logger.info("No active search profile — not starting a run")
+        return False
+
+    background_tasks.add_task(_run_search, profile.id)
+
+    return True
+
+
+async def _run_search(profile_id: int) -> None:
+    """
+    Run the pipeline for one search profile, on its own database session.
+
+    A background task outlives the request, so it must not borrow the
+    request's session — that one is closed the moment the response is sent.
+
+    Args:
+        profile_id: The search profile to run
+    """
+    from sqlmodel import Session as SQLModelSession
+
+    from job_agent.core.orchestrator import RunOrchestrator
+    from job_agent.dashboard.deps import get_engine
+
+    try:
+        with SQLModelSession(get_engine()) as run_session:
+            profile = (
+                run_session.query(SearchProfile)
+                .filter(SearchProfile.id == profile_id)
+                .first()
+            )
+
+            if not profile:
+                return
+
+            await RunOrchestrator(run_session).run(
+                profile,
+                trigger="resume_changed",
+                generate_documents=True,
+            )
+    except Exception as e:
+        # A background run that fails must not take the process with it. The
+        # register records what happened; the desk's run button is still there.
+        logger.error(f"Background run after a resume change failed: {e}")
 
 
 def _master_summary(document: MasterDocument) -> dict:
@@ -74,6 +154,7 @@ def _version_summary(version: DocumentVersion) -> dict:
 
 @router.post("/masters")
 async def upload_master(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(..., description="Master .docx, .pdf, .txt or .md"),
     doc_type: str = Form("resume", description="resume or cover_letter"),
     name: Optional[str] = Form(None, description="Display name"),
@@ -116,7 +197,23 @@ async def upload_master(
             name=name or Path(file.filename or "").stem or None,
         )
 
-        return {"status": "stored", **_master_summary(document)}
+        # `upload_master` makes the new resume the one in use, so the rest of
+        # the pipeline has to follow it — otherwise the stations keep
+        # searching the previous resume's job titles and the wire fills with
+        # postings the new resume cannot answer.
+        sync = None
+
+        if document.doc_type == DocumentType.RESUME and document.is_active:
+            sync = sync_to_resume(session, document)
+            session.commit()
+
+            _start_a_run_for(background_tasks, session)
+
+        return {
+            "status": "stored",
+            **_master_summary(document),
+            "pipeline": sync.to_dict() if sync else None,
+        }
 
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -184,6 +281,7 @@ async def get_master(
 @router.post("/masters/{master_id}/activate")
 async def activate_master(
     master_id: int,
+    background_tasks: BackgroundTasks,
     session: Session = Depends(SessionDep),
 ) -> dict:
     """
@@ -213,10 +311,173 @@ async def activate_master(
         other.is_active = False
 
     document.is_active = True
+
+    # Switching resume is meant to change what the agent is looking for. The
+    # search terms, the wire and the tray all follow from here.
+    sync = None
+
+    if document.doc_type == DocumentType.RESUME:
+        sync = sync_to_resume(session, document)
+
     session.commit()
     session.refresh(document)
 
-    return {"status": "activated", **_master_summary(document)}
+    if sync:
+        _start_a_run_for(background_tasks, session)
+
+    return {
+        "status": "activated",
+        **_master_summary(document),
+        "pipeline": sync.to_dict() if sync else None,
+    }
+
+
+@router.delete("/masters/{master_id}")
+async def delete_master(
+    master_id: int,
+    session: Session = Depends(SessionDep),
+) -> dict:
+    """
+    Remove a master document.
+
+    Uploading the wrong file, or a resume aimed at a career you have moved on
+    from, left it on the desk for ever — there was no way to take one off.
+
+    The tailored versions already built from it are kept, and so is anything
+    already submitted: those are the record of what was actually sent, and
+    deleting a master must not rewrite history. They are simply no longer
+    attached to a master that exists.
+
+    Args:
+        master_id: The master to remove
+
+    Returns:
+        What was removed, and what took its place
+
+    Raises:
+        HTTPException: If it does not exist, or is the last resume in use
+    """
+    document = session.query(MasterDocument).filter(
+        MasterDocument.id == master_id
+    ).first()
+
+    if not document:
+        raise HTTPException(status_code=404, detail="Master document not found")
+
+    was_active = document.is_active
+    doc_type = document.doc_type
+    name = document.name
+
+    others = (
+        session.query(MasterDocument)
+        .filter(
+            MasterDocument.doc_type == doc_type,
+            MasterDocument.id != master_id,
+        )
+        .order_by(MasterDocument.created_at.desc())
+        .all()
+    )
+
+    # Deleting the resume in use with nothing to fall back on would leave the
+    # agent unable to tailor anything, and the failure would surface later as
+    # "could not generate documents" rather than here, where it is fixable.
+    if was_active and doc_type == DocumentType.RESUME and not others:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "That is the only resume you have, and the agent cannot tailor "
+                "without one. Upload a replacement first, then remove this."
+            ),
+        )
+
+    versions = (
+        session.query(DocumentVersion)
+        .filter(DocumentVersion.master_document_id == master_id)
+        .count()
+    )
+
+    session.delete(document)
+
+    promoted = None
+    sync = None
+
+    if was_active and others:
+        promoted = others[0]
+        promoted.is_active = True
+
+        if doc_type == DocumentType.RESUME:
+            sync = sync_to_resume(session, promoted)
+
+    session.commit()
+
+    logger.info(f"Deleted master document #{master_id} ({name})")
+
+    return {
+        "status": "deleted",
+        "id": master_id,
+        "name": name,
+        "was_in_use": was_active,
+        "now_in_use": promoted.name if promoted else None,
+        "tailored_versions_kept": versions,
+        "pipeline": sync.to_dict() if sync else None,
+        "message": (
+            f"'{name}' removed"
+            + (f" — '{promoted.name}' is now the one in use" if promoted else "")
+            + (
+                f". {versions} tailored version(s) already built from it were kept."
+                if versions else "."
+            )
+        ),
+    }
+
+
+@router.post("/masters/resync")
+async def resync_pipeline(
+    background_tasks: BackgroundTasks,
+    run: bool = Query(True, description="Also start a search straight away"),
+    session: Session = Depends(SessionDep),
+) -> dict:
+    """
+    Point the search at the resume in use, and refill the wire.
+
+    Uploading or switching a resume does this by itself. This is the same
+    action on demand, for the case the automatic one could not cover: a resume
+    edited outside the app, a run that failed, or a wire that emptied because
+    every posting on it belongs to a resume no longer in use.
+
+    Args:
+        run: Start a search immediately as well
+
+    Returns:
+        What the search now looks for, and whether a run was started
+
+    Raises:
+        HTTPException: If no resume is in use
+    """
+    from job_agent.services.resume_sync import active_master
+
+    master = active_master(session)
+
+    if not master:
+        raise HTTPException(
+            status_code=409,
+            detail="No resume is in use — upload one on the desk first",
+        )
+
+    sync = sync_to_resume(session, master)
+    session.commit()
+
+    started = _start_a_run_for(background_tasks, session) if run else False
+
+    return {
+        "status": "resynced",
+        "pipeline": sync.to_dict(),
+        "run_started": started,
+        "message": (
+            sync.describe()
+            + (" Searching now — the wire will refill." if started else "")
+        ),
+    }
 
 
 @router.post("/masters/{master_id}/reparse")

@@ -19,8 +19,10 @@ from sqlmodel import select
 
 from job_agent.connectors import create_connector, is_connector_registered
 from job_agent.models import PlatformAccount, ConnectionStatus, AutomationMode
+from job_agent.models.database import ApplyStrategy
 from job_agent.core.session_manager import get_session_manager
 from job_agent.dashboard.deps import SessionDep
+from job_agent.services.careers_finder import Discovery, find_listings_page
 from job_agent.services.session_monitor import SessionMonitor
 from job_agent.utils.dates import utcnow
 
@@ -98,6 +100,39 @@ def _connector_for_url(url: str) -> str:
     return "generic_ats"
 
 
+# Aggregators that hold the applicant's documents themselves and apply
+# through their own flow. Writing a tailored resume for one is work the board
+# never reads: it sends the copy on the profile whatever is attached.
+_PLATFORM_PROFILE_HOSTS = (
+    "simplyhired.com",
+    "indeed.com",
+    "linkedin.com",
+    "glassdoor.com",
+    "ziprecruiter.com",
+    "monster.com",
+    "careerbuilder.com",
+)
+
+
+def _apply_strategy_for(url: str) -> ApplyStrategy:
+    """
+    Guess how a board wants applications built, from its address.
+
+    Args:
+        url: The station's listings URL
+
+    Returns:
+        The strategy to start with. Changeable on the station card — this is a
+        sensible default, not a verdict.
+    """
+    host = (urlparse(url).netloc or "").lower()
+
+    if any(host.endswith(known) for known in _PLATFORM_PROFILE_HOSTS):
+        return ApplyStrategy.PLATFORM_PROFILE
+
+    return ApplyStrategy.TAILORED
+
+
 def _slugify(name: str) -> str:
     """
     Turn a station name into a platform identifier.
@@ -120,19 +155,26 @@ async def add_custom_station(
     """
     Add a station for a job board or careers page the agent doesn't ship with.
 
-    The generic connector drives it: give it the URL of a search results page
-    or a company's job listings and it reads postings the same way it reads a
-    Greenhouse board. Putting `{query}` and `{location}` in the URL lets each
-    run search with the profile's own terms; a plain URL is opened as-is.
+    **The company's own address is enough.** Paste `https://acme.com` and the
+    agent follows the site's careers link to the listings, and on to the
+    Greenhouse or Lever board behind it if there is one — see
+    `careers_finder`. Requiring the exact listings URL was asking the user to
+    know something the agent could work out, and getting it wrong produced a
+    station that searched a homepage and reported no jobs.
+
+    An exact URL is still taken as given, so nothing is lost by knowing it.
+    Putting `{query}` and `{location}` in the URL lets each run search with the
+    profile's own terms, and disables the walk — a URL written with
+    placeholders was written deliberately.
 
     A station added here starts out needing sign-in only if you say it does.
     Most public boards don't, and those are searchable immediately.
 
     Args:
-        payload: {name, url, requires_signin?}
+        payload: {name, url, requires_signin?, find_listings_page?}
 
     Returns:
-        The new station
+        The new station, and what the walk found
 
     Raises:
         HTTPException: If the name or URL is unusable, or the name is taken
@@ -151,12 +193,25 @@ async def add_custom_station(
             status_code=400, detail="That name has no letters or digits in it"
         )
 
+    # A bare domain is the most natural thing to paste, and rejecting it for
+    # want of a scheme taught nothing.
+    if url and not re.match(r"^https?://", url, re.IGNORECASE):
+        url = f"https://{url}"
+
     parsed = urlparse(url)
 
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+    # Supplying the scheme means a non-empty netloc no longer proves anything:
+    # "not a url" becomes "https://not a url" and parses happily. The host has
+    # to look like a host.
+    host_is_plausible = bool(
+        re.fullmatch(r"[\w.\-]+(:\d+)?", parsed.netloc or "")
+        and "." in parsed.netloc
+    )
+
+    if parsed.scheme not in ("http", "https") or not host_is_plausible:
         raise HTTPException(
             status_code=400,
-            detail="The URL needs to start with http:// or https://",
+            detail="That doesn't look like a web address",
         )
 
     if is_connector_registered(platform):
@@ -179,7 +234,19 @@ async def add_custom_station(
 
     session_manager = await get_session_manager()
 
+    # Walk from whatever was pasted to the page that actually lists the jobs.
+    # Never fatal: a walk that finds nothing leaves the URL as it was given.
+    discovery = Discovery(url=url)
+
+    if payload.get("find_listings_page", True):
+        try:
+            discovery = await find_listings_page(url)
+        except Exception as e:
+            logger.info(f"Could not look for a listings page on {url}: {e}")
+
+    url = discovery.url
     connector_kind = _connector_for_url(url)
+    strategy = _apply_strategy_for(url)
 
     account = PlatformAccount(
         platform=platform,
@@ -189,6 +256,7 @@ async def add_custom_station(
         connector_kind=connector_kind,
         requires_signin=requires_signin,
         search_url=url,
+        apply_strategy=strategy,
         # A public board has nothing to sign into and can be searched at once.
         # One that does need an account waits until the user has signed in.
         status=(
@@ -206,18 +274,30 @@ async def add_custom_station(
 
     logger.info(f"Added custom station {platform} -> {url}")
 
+    if requires_signin:
+        next_step = f"'{platform}' added — connect it to sign in, then run a search"
+    else:
+        next_step = f"'{platform}' added — it will be searched on the next run"
+
     return {
         "status": "added",
         "platform": account.platform,
         "search_url": account.search_url,
         "connector_kind": connector_kind,
+        "apply_strategy": strategy.value,
         "requires_signin": requires_signin,
         "connection_status": account.status.value,
-        "message": (
-            f"'{platform}' added — connect it to sign in, then run a search"
-            if requires_signin
-            else f"'{platform}' added — it will be searched on the next run"
-        ),
+        # What the walk did, so the user can see which page the station will
+        # actually read — and correct it now rather than after an empty run.
+        "listings_page": {
+            "url": discovery.url,
+            "as_given": discovery.as_given,
+            "how": discovery.how,
+            "hosted_board": discovery.ats,
+            "pages_tried": discovery.tried,
+            "message": discovery.describe(),
+        },
+        "message": f"{next_step}. {discovery.describe()}",
     }
 
 

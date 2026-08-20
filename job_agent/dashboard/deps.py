@@ -43,6 +43,13 @@ def get_engine() -> Engine:
         )
         SQLModel.metadata.create_all(_engine)
 
+        # create_all() adds missing tables but never a column added to an
+        # existing one. Without this an install that predates a new column
+        # starts fine and then fails on the first query that touches it.
+        from job_agent.models.migrations import apply_additive_migrations
+
+        apply_additive_migrations(_engine)
+
     return _engine
 
 

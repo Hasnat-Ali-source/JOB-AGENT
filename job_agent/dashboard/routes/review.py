@@ -48,6 +48,7 @@ from job_agent.models.database import (
     MasterDocument,
     PlatformAccount,
 )
+from job_agent.services.answer_carry import CarryResult, carry_answers_forward
 from job_agent.services.application_analyst import ApplicationAnalyst
 from job_agent.services.field_classifier import FieldClassifier
 from job_agent.services.submission_gate import SubmissionGate
@@ -85,6 +86,7 @@ def _summary(application: Application, job: Optional[Job]) -> dict:
         "status": application.submission_status.value,
         "form_url": application.form_url,
         "filled_count": len(application.filled_fields or {}),
+        "form_steps": (application.form_walk or {}).get("step_count", 1),
         "deferred_count": len(deferred),
         "unanswered_count": len(unanswered),
         "required_unanswered": required_unanswered,
@@ -227,6 +229,9 @@ async def list_queue(
     status: Optional[str] = Query(
         "queued_for_review", description="Filter by status; pass 'all' for everything"
     ),
+    for_current_resume: bool = Query(
+        True, description="Only applications built from the resume in use"
+    ),
     session: Session = Depends(SessionDep),
 ) -> dict:
     """
@@ -234,16 +239,40 @@ async def list_queue(
 
     Args:
         status: Application status to filter by, or "all"
+        for_current_resume: Hide applications whose documents were built from
+            a resume no longer in use. On by default: after switching resume
+            the tray otherwise still offers applications carrying the old
+            one's tailored PDF, and releasing one sends a document written
+            from a resume the user has moved away from.
 
     Returns:
         Queue entries and counts
     """
+    from job_agent.services.resume_sync import (
+        active_master,
+        application_uses_current_resume,
+    )
+
     query = session.query(Application)
 
     if status and status != "all":
         query = query.filter(Application.submission_status == status)
 
     applications = query.order_by(Application.created_at.desc()).all()
+
+    master = active_master(session) if for_current_resume else None
+    hidden = 0
+
+    if master:
+        current, stale = [], 0
+
+        for application in applications:
+            if application_uses_current_resume(session, application, master.id):
+                current.append(application)
+            else:
+                stale += 1
+
+        applications, hidden = current, stale
 
     jobs = {
         job.id: job
@@ -258,6 +287,10 @@ async def list_queue(
         "total": len(entries),
         "needs_answers": sum(1 for e in entries if e["required_unanswered"]),
         "ready_to_submit": sum(1 for e in entries if e["ready_to_submit"]),
+        # So the tray can say "3 built from an earlier resume are not shown"
+        # rather than appearing to have lost them.
+        "hidden_from_earlier_resumes": hidden,
+        "resume_in_use": master.name if master else None,
         "applications": entries,
     }
 
@@ -327,11 +360,13 @@ async def review_detail(
                 "created_at": version.created_at.isoformat(),
             })
 
-    analysis = ApplicationAnalyst(session).analyse(application).to_dict()
+    analysis = (await ApplicationAnalyst(session).analyse_async(application)).to_dict()
 
     return {
         **_summary(application, job),
         "filled_fields": application.filled_fields or {},
+        # How many steps of this form were read, and where the agent stopped.
+        "walk": application.form_walk,
         "sensitive_questions": sensitive,
         "other_questions": other,
         "documents": documents,
@@ -452,6 +487,14 @@ async def submit_answers(
         profile.remembered_answers = remembered
         profile.updated_at = utcnow()
 
+    # The other applications in the tray ask the same questions. Saving the
+    # answer for *next time* was never the whole job — the forms that need it
+    # are the ones already waiting, and they were filled before this answer
+    # existed.
+    carried = carry_answers_forward(
+        session, profile, exclude_application_id=application_id
+    )
+
     session.commit()
     session.refresh(application)
 
@@ -460,18 +503,87 @@ async def submit_answers(
         if d.get("required") and d.get("value_entered_by_user") in (None, "")
     ]
 
+    if carried.changed_anything:
+        _audit(
+            session,
+            AuditAction.APPLICATION_REVIEWED,
+            f"Carried {carried.answers_filled} answer(s) onto "
+            f"{carried.applications_updated} other application(s) in the tray",
+            {"source_application_id": application_id, **carried.to_dict()},
+        )
+
     return {
         "status": "recorded",
         "answered": list(answers),
         "remembered_for_future_forms": remembered_count,
         "required_unanswered": outstanding,
         "ready_to_submit": not outstanding,
+        "carried_to_other_applications": carried.to_dict(),
+    }
+
+
+@router.post("/apply-saved-answers")
+async def apply_saved_answers(session: Session = Depends(SessionDep)) -> dict:
+    """
+    Put every answer already saved onto the applications still waiting.
+
+    Answers are carried forward automatically from now on, when one is saved
+    and again when an application is submitted. That does nothing for the
+    answers saved *before* — and there are usually a great many of them,
+    sitting in the profile while the tray asks the same questions again. This
+    is the one-off catch-up for that backlog.
+
+    Returns:
+        What it filled, and on which applications
+    """
+    profile = session.query(CandidateProfile).filter(
+        CandidateProfile.is_active == True  # noqa: E712 — SQL comparison
+    ).first()
+
+    if not profile:
+        raise HTTPException(
+            status_code=404,
+            detail="No candidate profile yet — there are no saved answers to apply",
+        )
+
+    saved = len(profile.remembered_answers or {})
+    carried = carry_answers_forward(session, profile)
+
+    session.commit()
+
+    if carried.changed_anything:
+        _audit(
+            session,
+            AuditAction.APPLICATION_REVIEWED,
+            f"Applied {carried.answers_filled} saved answer(s) to "
+            f"{carried.applications_updated} waiting application(s)",
+            carried.to_dict(),
+        )
+
+    return {
+        "status": "applied",
+        "saved_answers": saved,
+        **carried.to_dict(),
+        "message": carried.describe() or (
+            f"Nothing to fill — the {saved} answer(s) you have saved do not "
+            f"match any unanswered question in the tray."
+            if saved else
+            "You have not saved any answers yet. Answer a form's questions and "
+            "tick 'save these answers' and they will carry to the rest."
+        ),
     }
 
 
 @router.post("/{application_id}/regenerate-documents")
 async def regenerate_documents(
     application_id: int,
+    fit_to_posting: bool = Query(
+        False,
+        description=(
+            "Aim the resume at this posting as hard as honesty allows, and "
+            "report what it was worth"
+        ),
+    ),
     session: Session = Depends(SessionDep),
 ) -> dict:
     """
@@ -507,8 +619,14 @@ async def regenerate_documents(
             status_code=404, detail=f"Job {application.job_id} not found"
         )
 
+    builder = DocumentBuilder(session)
+
     try:
-        versions = await DocumentBuilder(session).build_application_package(job)
+        versions = await (
+            builder.build_fitted_package(job)
+            if fit_to_posting
+            else builder.build_application_package(job)
+        )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
@@ -533,7 +651,12 @@ async def regenerate_documents(
     session.commit()
     session.refresh(application)
 
-    report = ApplicationAnalyst(session).analyse(application)
+    report = await ApplicationAnalyst(session).analyse_async(application)
+
+    # What the fit rewrite actually achieved, taken from the notes the builder
+    # recorded on the version. Saying "fit 54% → 91%" is the difference
+    # between an action the user trusts and a button they press hopefully.
+    fit_notes = (resume.tailoring_notes or []) if resume else []
 
     _audit(
         session,
@@ -555,6 +678,8 @@ async def regenerate_documents(
         "cover_letter_version_id": application.cover_letter_version_id,
         "reviewed_by_user": False,
         "analysis": report.to_dict(),
+        "fitted_to_posting": fit_to_posting,
+        "tailoring_notes": fit_notes,
         "next_step": (
             "Read the new documents in the tray and approve again — the "
             "earlier approval was for documents that no longer exist."
@@ -613,6 +738,205 @@ def _reattach_uploads(application: Application, resume, cover) -> None:
     # rather than mutated in place.
     application.filled_fields = filled
     application.deferred_fields = deferred
+
+
+# Reading answers back off the page the user filled in themselves. Targeted at
+# the questions this application is actually waiting on, rather than scraping
+# whatever pairs of text the page happens to hold: a summary page carries the
+# posting's own headings and the board's boilerplate, and inventing answers out
+# of those would put words in the user's mouth.
+_READ_ANSWERS_JS = r"""
+(questions) => {
+    const norm = (t) => (t || '')
+        .replace(/\s+/g, ' ')
+        .replace(/\*/g, '')
+        .trim()
+        .toLowerCase();
+
+    const blocks = [...document.querySelectorAll(
+        'div, p, span, dt, dd, label, legend, li, h1, h2, h3, h4'
+    )];
+    const answers = {};
+
+    for (const question of questions) {
+        const want = norm(question);
+        if (!want || want.length < 8) continue;
+
+        // The smallest element that says the question, so the match is the
+        // label itself rather than the panel containing half the form.
+        let label = null;
+        for (const el of blocks) {
+            const text = norm(el.innerText);
+            if (!text) continue;
+            if (text === want || text.startsWith(want)) {
+                if (!label || el.innerText.length < label.innerText.length) {
+                    label = el;
+                }
+            }
+        }
+        if (!label) continue;
+
+        const whole = (label.innerText || '').replace(/\s+/g, ' ').trim();
+        let answer = '';
+
+        // Either the label element carries the answer after the question...
+        if (norm(whole) !== want) {
+            answer = whole.slice(question.replace(/\s+/g, ' ').trim().length).trim();
+        }
+
+        // ...or the answer is the next block after it.
+        let sibling = label.nextElementSibling;
+        while (!answer && sibling) {
+            answer = (sibling.innerText || '').replace(/\s+/g, ' ').trim();
+            sibling = sibling.nextElementSibling;
+        }
+
+        answer = answer.replace(/^[:\-–—]\s*/, '').trim();
+
+        if (answer && answer.length <= 300 && norm(answer) !== want) {
+            answers[question] = answer;
+        }
+    }
+
+    return answers;
+}
+"""
+
+
+@router.post("/{application_id}/read-my-answers")
+async def read_my_answers(
+    application_id: int,
+    remember_sensitive: bool = Query(False),
+    session: Session = Depends(SessionDep),
+) -> dict:
+    """
+    Learn the answers the user typed into the open form themselves.
+
+    The tray remembers what the user answers *in the tray*. It had no way to
+    learn what they answered in the browser window — and carrying on by hand
+    is exactly what they do when the agent stops on a question it will not
+    answer. Those answers were lost every time, so the next form asked again,
+    and the agent looked as though it never remembered anything.
+
+    Only the questions this application is waiting on are read, and only from
+    the page already open — nothing is typed, clicked or submitted here.
+
+    Args:
+        application_id: Application ID
+        remember_sensitive: Also keep answers to sensitive questions. Off by
+            default, exactly as when answering in the tray.
+
+    Returns:
+        What was read and what was kept
+
+    Raises:
+        HTTPException: If there is no open window to read
+    """
+    application = _get_application(session, application_id)
+    job = session.query(Job).filter(Job.id == application.job_id).first()
+
+    if not job:
+        raise HTTPException(status_code=404, detail="This application has no job")
+
+    deferred = dict(application.deferred_fields or {})
+    outstanding = [
+        question
+        for question, detail in deferred.items()
+        if not detail.get("value_entered_by_user")
+    ]
+
+    if not outstanding:
+        return {
+            "read": 0,
+            "remembered": 0,
+            "answers": {},
+            "message": "Nothing on this application is waiting on an answer.",
+        }
+
+    session_manager = await get_session_manager()
+    page = await session_manager.get_page(job.platform, needs_signin=False)
+
+    if not page:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"No open {job.platform} window to read. Open the application "
+                f"and answer it there, then try this again."
+            ),
+        )
+
+    try:
+        found = await page.evaluate(_READ_ANSWERS_JS, outstanding)
+    except Exception as e:
+        logger.warning(f"Could not read answers from the open page: {e}")
+        raise HTTPException(
+            status_code=409,
+            detail=f"The open page could not be read: {e}",
+        )
+
+    found = {q: a for q, a in (found or {}).items() if q in deferred}
+
+    if not found:
+        return {
+            "read": 0,
+            "remembered": 0,
+            "answers": {},
+            "message": (
+                "Nothing on the open page matched the questions this "
+                "application is waiting on."
+            ),
+        }
+
+    profile = (
+        session.query(CandidateProfile)
+        .filter(CandidateProfile.id == application.candidate_profile_id)
+        .first()
+        if application.candidate_profile_id
+        else None
+    )
+    remembered = dict(profile.remembered_answers or {}) if profile else {}
+    kept = 0
+
+    for question, answer in found.items():
+        deferred[question] = {**deferred[question], "value_entered_by_user": answer}
+
+        is_sensitive = (
+            deferred[question].get("category") == FieldCategory.SENSITIVE.value
+        )
+
+        if profile and (remember_sensitive or not is_sensitive):
+            remembered[FieldClassifier.remember_key(question)] = answer
+            kept += 1
+
+    application.deferred_fields = deferred
+    application.updated_at = utcnow()
+
+    if profile and kept:
+        profile.remembered_answers = remembered
+        profile.updated_at = utcnow()
+
+    carried = carry_answers_forward(
+        session, profile, exclude_application_id=application_id
+    )
+
+    session.commit()
+    session.refresh(application)
+
+    logger.info(
+        f"Read {len(found)} answer(s) off the open form for application "
+        f"{application_id}; kept {kept}"
+    )
+
+    return {
+        "read": len(found),
+        "remembered": kept,
+        "answers": found,
+        "carried_to_other_applications": carried.to_dict() if carried else None,
+        "message": (
+            f"Read {len(found)} answer(s) you gave in the window"
+            + (f" and kept {kept} for future forms." if kept else ".")
+        ),
+    }
 
 
 @router.post("/{application_id}/approve")
@@ -744,7 +1068,7 @@ async def application_analysis(
     """
     application = _get_application(session, application_id)
 
-    return ApplicationAnalyst(session).analyse(application).to_dict()
+    return (await ApplicationAnalyst(session).analyse_async(application)).to_dict()
 
 
 # A react-select renders its menu as visible [role="option"] nodes whose ids
@@ -1411,6 +1735,35 @@ async def submit_application(
     )
 
     SubmissionRecorder(session).record(application, account, outcome, initiated_by="user")
+
+    # A submitted application has proved which of its answers the user stands
+    # behind. Everything still waiting in the tray asks most of the same
+    # questions, so it inherits them now rather than asking again.
+    carried = CarryResult()
+
+    if outcome.submitted:
+        profile = (
+            session.query(CandidateProfile)
+            .filter(CandidateProfile.id == application.candidate_profile_id)
+            .first()
+            if application.candidate_profile_id else None
+        )
+
+        carried = carry_answers_forward(
+            session, profile, exclude_application_id=application_id
+        )
+
+        if carried.changed_anything:
+            _audit(
+                session,
+                AuditAction.APPLICATION_REVIEWED,
+                f"Carried {carried.answers_filled} answer(s) from the submitted "
+                f"application onto {carried.applications_updated} still waiting",
+                {"source_application_id": application_id, **carried.to_dict()},
+            )
+
+        session.commit()
+
     session.refresh(application)
     session.refresh(account)
 
@@ -1427,6 +1780,7 @@ async def submit_application(
             else "Submitted, but no confirmation was found — verify with the employer"
         ),
         "errors": outcome.validation_errors,
+        "carried_to_other_applications": carried.to_dict(),
     }
 
 

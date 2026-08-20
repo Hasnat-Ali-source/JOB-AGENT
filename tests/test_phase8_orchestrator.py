@@ -457,13 +457,26 @@ class TestInterruptionDetection:
             return self._text
 
     @pytest.mark.asyncio
-    async def test_recaptcha_widget_is_detected(self):
-        page = self.FakePage(selectors={"iframe[src*='recaptcha']"})
+    async def test_recaptcha_challenge_is_detected(self):
+        page = self.FakePage(
+            selectors={"iframe[src*='recaptcha'][src*='bframe']"}
+        )
 
         interruption = await InterruptionDetector.detect(page)
 
         assert interruption.kind == InterruptionKind.CAPTCHA
         assert interruption.halts_platform
+
+    @pytest.mark.asyncio
+    async def test_recaptcha_badge_is_not_a_challenge(self):
+        """
+        An ATS embeds an invisible reCAPTCHA on every application form. Its
+        badge is not something the user can solve, and treating it as a
+        challenge paused the station on every form the agent ever opened.
+        """
+        page = self.FakePage(selectors={"iframe[src*='recaptcha']"})
+
+        assert await InterruptionDetector.detect(page) is None
 
     @pytest.mark.asyncio
     async def test_captcha_guidance_never_offers_to_solve_it(self):

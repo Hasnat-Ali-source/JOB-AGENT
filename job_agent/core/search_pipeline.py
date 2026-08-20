@@ -18,6 +18,7 @@ Used by dashboard search API and (Phase 8) scheduled search tasks.
 """
 
 import logging
+import re
 from typing import Any, List, Optional
 
 from sqlalchemy.orm import Session
@@ -78,6 +79,23 @@ class SearchPipeline:
         """
         self.db_session = db_session
         self.fit_scorer = get_fit_scorer()
+
+    @property
+    def _master_id(self) -> Optional[int]:
+        """
+        The resume in use, stamped onto everything this run collects.
+
+        Looked up per pipeline rather than cached at import: a run can be
+        started by the same process that just changed the resume.
+
+        Returns:
+            The active master resume's id, or None when none is set
+        """
+        from job_agent.services.resume_sync import active_master
+
+        master = active_master(self.db_session)
+
+        return master.id if master else None
 
     async def search(
         self,
@@ -342,6 +360,14 @@ class SearchPipeline:
             self._log_dedup(platform_account, job_posting, existing)
             return
 
+        if _is_not_a_posting(job_posting):
+            logger.info(
+                f"Ignoring '{job_posting.title}' — reads as a page on the board "
+                f"rather than a posting"
+            )
+            result.duplicates_skipped += 1
+            return
+
         job = self._build_job(job_posting, platform_account, dedup_hash)
 
         # Hard filters: record the verdict, keep the job either way
@@ -354,6 +380,12 @@ class SearchPipeline:
 
         # Fit score (Phase 3 heuristic; Phase 4 swaps in the LLM scorer)
         job.fit_score = self.fit_scorer.score_job(job, search_profile)
+
+        # Which resume this posting was found for. The wire shows only the
+        # current resume's postings, so without this a run's results are
+        # indistinguishable from the previous resume's and the wire goes on
+        # showing jobs the user has moved away from.
+        job.matched_master_id = self._master_id
 
         self.db_session.add(job)
         self.db_session.commit()
@@ -482,3 +514,51 @@ class SearchPipeline:
 
         self.db_session.add(audit)
         self.db_session.commit()
+
+
+# Titles a board gives its own pages, not its postings. A listings index, a
+# browse page or a search result page has the same URL shape as a job on many
+# sites, so link collection picks them up — and "remote jobs in united states"
+# then sits on the wire looking like something you could apply to.
+_NOT_A_JOB_TITLE = re.compile(
+    r"^\s*(current )?(job )?openings?( at | in |$)"
+    r"|^\s*[\w\s]{0,30}jobs? (in|at|near|for)\b"
+    r"|^\s*(all|browse|search|find|view) (jobs|openings|roles|careers)"
+    r"|^\s*careers?( at | page|$)"
+    r"|^\s*job search"
+    r"|^\s*(sign in|log in|create account|privacy|cookie)"
+    r"|^\s*(unable to read|error|job posting)\s*$",
+    re.IGNORECASE,
+)
+
+# What a board's own form controls leave in a location field.
+_NOT_A_LOCATION = re.compile(r"^\s*(select|choose|all|any)\b", re.IGNORECASE)
+
+
+def _is_not_a_posting(job_posting) -> bool:
+    """
+    Whether a collected "job" is really a page on the board.
+
+    Args:
+        job_posting: What the connector read
+
+    Returns:
+        True when it should not reach the wire
+    """
+    title = (getattr(job_posting, "title", "") or "").strip()
+
+    if not title or len(title) < 3:
+        return True
+
+    if _NOT_A_JOB_TITLE.search(title):
+        return True
+
+    # A posting with no company *and* no readable location is a page that
+    # happened to parse. A real posting names at least one of them.
+    company = (getattr(job_posting, "company", "") or "").strip().lower()
+    location = (getattr(job_posting, "location", "") or "").strip()
+
+    if _NOT_A_LOCATION.match(location) and company in ("", "unknown"):
+        return True
+
+    return False

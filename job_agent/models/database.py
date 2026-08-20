@@ -33,6 +33,26 @@ class ConnectionStatus(str, Enum):
     ERROR = "error"
 
 
+class ApplyStrategy(str, Enum):
+    """
+    How an application is put together on a given platform.
+
+    Not every board wants the same thing, and forcing one shape on all of them
+    is what limited the agent. Two are genuinely different:
+
+    - TAILORED: the agent writes a resume and cover letter for the posting,
+      attaches them, fills the form and holds it for review. This is where the
+      product's value is, and it needs a board that accepts an upload.
+    - PLATFORM_PROFILE: the platform already holds the documents and answers —
+      Indeed SmartApply, LinkedIn Easy Apply — and an application is a matter
+      of driving its flow. Generating a tailored PDF for one of these is wasted
+      work: the board never asks for it and sends its own copy instead.
+    """
+
+    TAILORED = "tailored"
+    PLATFORM_PROFILE = "platform_profile"
+
+
 class AutomationMode(str, Enum):
     """Automation level for a platform account."""
     SEARCH_ONLY = "search_only"  # Read-only search
@@ -198,6 +218,11 @@ class SearchProfile(SQLModel, table=True):
     salary_max: Optional[int] = None
     date_posted_within_days: Optional[int] = None  # e.g., 7 (last 7 days)
     
+    # The master resume these terms were derived from. Set when the search is
+    # synced to a resume, so the desk can say whether the search still
+    # reflects the resume in use.
+    derived_from_master_id: Optional[int] = None
+
     # Metadata
     is_active: bool = Field(default=True)
 
@@ -341,6 +366,15 @@ class PlatformAccount(SQLModel, table=True):
     # the generic one here and carries its own search_url below.
     connector_kind: Optional[str] = None
 
+    # Taken out of service by the user, without losing the connection. A
+    # station you have signed into is expensive to rebuild, so "stop using
+    # this one for now" must not mean "disconnect it".
+    paused: bool = Field(default=False)
+
+    # How this station wants an application built. See ApplyStrategy: a board
+    # that supplies its own documents should not have documents written for it.
+    apply_strategy: ApplyStrategy = Field(default=ApplyStrategy.TAILORED)
+
     # Whether this station needs a signed-in session. None defers to what the
     # connector declares — the right answer for the built-in platforms. A
     # user-added station says so itself, because the same generic connector
@@ -414,6 +448,12 @@ class Job(SQLModel, table=True):
     # Deduplication
     dedup_hash: str = Field(index=True)  # Hash of (company + title + location), normalized
     
+    # Which master resume was in use when this posting was collected. The
+    # wire shows only the current resume's postings, so that changing resume
+    # changes what you are looking at — a Full-Stack resume should not be
+    # read against a wire full of VP-of-Data roles found for a previous one.
+    matched_master_id: Optional[int] = Field(default=None, index=True)
+
     # Tracking
     first_seen_at: datetime = Field(default_factory=utcnow)
     
@@ -470,6 +510,12 @@ class Application(SQLModel, table=True):
 
     # Form context (Phase 5)
     form_url: Optional[str] = None  # Where the form was filled
+
+    # How a multi-step form was walked: which steps were read, what was
+    # pressed to advance, and where the walk stopped. Null for a single-page
+    # form. Its own column rather than a key inside filled_fields, which half
+    # a dozen places iterate as form fields and would replay onto the form.
+    form_walk: Optional[dict] = Field(default=None, sa_column=Column(JSON))
     candidate_profile_id: Optional[int] = Field(
         default=None, foreign_key="candidate_profiles.id"
     )

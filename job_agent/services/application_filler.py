@@ -43,6 +43,10 @@ from job_agent.utils.dates import utcnow
 
 logger = logging.getLogger(__name__)
 
+# A click on a form control. Short: these are controls already on
+# screen, so a slow one means the page is busy, not that it is far.
+CLICK_TIMEOUT_MS = 6000
+
 
 @dataclass
 class FillOutcome:
@@ -52,6 +56,9 @@ class FillOutcome:
     deferred_fields: Dict[str, Any] = dataclass_field(default_factory=dict)
     screenshot_path: Optional[str] = None
     errors: List[str] = dataclass_field(default_factory=list)
+    # How the form was walked, when it had more than one step: which steps
+    # were read, what was pressed to advance, and where the walk stopped.
+    walk: Optional[Dict[str, Any]] = None
 
     @property
     def needs_user_input(self) -> bool:
@@ -86,6 +93,72 @@ class ApplicationFiller:
     # Filling
     # ------------------------------------------------------------------
 
+    async def fill_application(
+        self,
+        page: Any,
+        profile: CandidateProfile,
+        documents: Optional[Dict[str, str]] = None,
+        job: Any = None,
+        master_text: str = "",
+    ) -> FillOutcome:
+        """
+        Fill the whole application, however many steps it takes.
+
+        `fill_form` reads the screen in front of it. That is the entire
+        application on a Greenhouse board and about a fifth of one anywhere
+        else — Workday, iCIMS and most in-house portals are wizards, and
+        reading only their first step reported an application as filled when
+        four screens of it had never been seen. This drives the wizard: read a
+        step, fill it, press Next, read the next one, and stop before submit.
+
+        Args:
+            page: Playwright page on the first step of the form
+            profile: The user's candidate profile
+            documents: {"resume": path, "cover_letter": path}
+            job: The job being applied to
+            master_text: The master resume, the only source of drafted answers
+
+        Returns:
+            A FillOutcome covering every step, with the walk recorded on it
+        """
+        from job_agent.services.form_walker import FormWalker
+
+        merged = FillOutcome()
+
+        async def one_step(current_page: Any) -> FillOutcome:
+            step_outcome = await self.fill_form(
+                current_page,
+                profile,
+                documents=documents,
+                job=job,
+                master_text=master_text,
+                capture_screenshot=False,
+            )
+
+            # Later steps must not overwrite earlier ones: two screens of a
+            # wizard often both ask "Email", and the second answer is not a
+            # correction of the first.
+            for question, detail in step_outcome.filled_fields.items():
+                merged.filled_fields.setdefault(question, detail)
+
+            for question, detail in step_outcome.deferred_fields.items():
+                if question not in merged.filled_fields:
+                    merged.deferred_fields.setdefault(question, detail)
+
+            return step_outcome
+
+        walk = await FormWalker().walk(page, one_step)
+
+        merged.walk = walk.to_dict()
+        merged.screenshot_path = await self._capture_screenshot(page, merged)
+
+        logger.info(
+            f"Filled {len(merged.filled_fields)} field(s) across "
+            f"{walk.step_count} step(s), deferred {len(merged.deferred_fields)}"
+        )
+
+        return merged
+
     async def fill_form(
         self,
         page: Any,
@@ -93,6 +166,7 @@ class ApplicationFiller:
         documents: Optional[Dict[str, str]] = None,
         job: Any = None,
         master_text: str = "",
+        capture_screenshot: bool = True,
     ) -> FillOutcome:
         """
         Fill the application form currently open in the browser.
@@ -116,6 +190,20 @@ class ApplicationFiller:
         classifier = FieldClassifier(profile, dict(profile.remembered_answers or {}))
 
         for form_field in fields:
+            # A choice the form arrives with already made is answered. Asking
+            # the user to answer it again is asking them to confirm a default
+            # they never saw — and on Indeed's resume step, which opens with
+            # their resume selected, it was the first thing the tray demanded
+            # of them on an application that needed nothing.
+            if form_field.answered and form_field.options:
+                outcome.filled_fields[form_field.question] = {
+                    "value": form_field.current,
+                    "selector": form_field.selector,
+                    "category": FieldCategory.KNOWN.value,
+                    "reason": "already answered on the form",
+                }
+                continue
+
             classification = classifier.classify(form_field)
 
             # Document uploads resolve against the generated package
@@ -156,7 +244,8 @@ class ApplicationFiller:
         if job is not None and master_text:
             await self._draft_open_answers(outcome, job, master_text)
 
-        outcome.screenshot_path = await self._capture_screenshot(page, outcome)
+        if capture_screenshot:
+            outcome.screenshot_path = await self._capture_screenshot(page, outcome)
 
         logger.info(
             f"Filled {len(outcome.filled_fields)} field(s), "
@@ -282,11 +371,19 @@ class ApplicationFiller:
 
                 if form_field.tag == "select":
                     await locator.select_option(label=matched)
+                elif form_field.field_type == "radio":
+                    if not await self._choose_radio(page, form_field, matched):
+                        self._defer(
+                            outcome, form_field, FieldCategory.UNKNOWN,
+                            f"Could not select '{matched}' on this question",
+                        )
+                        return False
                 else:
                     await locator.fill(matched)
 
             elif form_field.field_type in ("checkbox", "radio"):
-                # A yes/no answer to a checkbox is still the user's call
+                # A choice with no options read from the page is one the agent
+                # cannot name, so it cannot know which control to press.
                 self._defer(
                     outcome, form_field, FieldCategory.UNKNOWN,
                     "Multiple-choice answers are left for you to select",
@@ -307,6 +404,85 @@ class ApplicationFiller:
                 "The agent could not fill this field automatically",
             )
             return False
+
+    @staticmethod
+    async def _choose_radio(page: Any, form_field: FormField, choice: str) -> bool:
+        """
+        Select one option of a radio group by the label the user reads.
+
+        A radio is checked, not filled — `fill()` on one raises "Input of type
+        radio cannot be filled", which is how an answer the user had given for
+        a required question was reported as unanswerable. And the option is
+        found by its *label*: Indeed's "No" radio carries `value="N"`, so
+        matching on the value picks nothing.
+
+        Args:
+            page: Playwright page
+            form_field: The radio group, whose selector names its first option
+            choice: The option label to select
+
+        Returns:
+            True if an option was checked
+        """
+        group = (
+            f'input[type="radio"][name="{form_field.name}"]'
+            if form_field.name
+            else form_field.selector
+        )
+
+        try:
+            radios = await page.locator(group).all()
+        except Exception:
+            radios = []
+
+        wanted = choice.strip().casefold()
+
+        for radio in radios:
+            label = ""
+            try:
+                radio_id = await radio.get_attribute("id")
+                if radio_id:
+                    label = await page.locator(
+                        f'label[for="{radio_id}"]'
+                    ).first.inner_text(timeout=1000)
+            except Exception:
+                label = ""
+
+            if not label:
+                try:
+                    label = await radio.get_attribute("value") or ""
+                except Exception:
+                    label = ""
+
+            label = label.strip()
+
+            # Exact first, then containment: a card-style option renders its
+            # label with extra description around the words the user chose.
+            if label.casefold() != wanted and wanted not in label.casefold():
+                continue
+
+            # The label is what a person clicks, and on these forms it is the
+            # only part with a size: the input is collapsed to nothing behind
+            # it, so clicking the input — even forced — lands on no pixels and
+            # the option is never selected.
+            if radio_id:
+                try:
+                    label_el = page.locator(f'label[for="{radio_id}"]').first
+
+                    if await label_el.is_visible():
+                        await label_el.click(timeout=CLICK_TIMEOUT_MS)
+                        return True
+                except Exception as e:
+                    logger.debug(f"Label click for '{choice}' did not land: {e}")
+
+            try:
+                await radio.check(force=True)
+                return True
+            except Exception as e:
+                logger.warning(f"Could not check radio '{choice}': {e}")
+                return False
+
+        return False
 
     async def _attach_file(
         self,
@@ -437,6 +613,10 @@ class ApplicationFiller:
             cover_letter_version=cover_letter_version.pdf_path if cover_letter_version else None,
             filled_fields=outcome.filled_fields,
             deferred_fields=outcome.deferred_fields,
+            # Its own column, not a key inside filled_fields: half a dozen
+            # places iterate that dict as form fields and would replay a walk
+            # record onto the form.
+            form_walk=outcome.walk,
             screenshot_path=outcome.screenshot_path,
             form_url=form_url,
             submission_status=ApplicationStatus.QUEUED_FOR_REVIEW,

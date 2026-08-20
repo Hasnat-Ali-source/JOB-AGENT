@@ -17,7 +17,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from job_agent.models.database import (
-    SearchProfile, PlatformAccount, Job, AuditLog, AuditAction
+    ApplicationStatus, SearchProfile, PlatformAccount, Job, AuditLog, AuditAction
 )
 from job_agent.dashboard.deps import get_session
 from job_agent.core.search_pipeline import SearchPipeline
@@ -231,25 +231,43 @@ async def list_jobs(
     status: Optional[str] = Query(None, description="Filter by status"),
     hard_filter_pass: Optional[bool] = Query(None, description="Filter by hard filter pass"),
     min_fit_score: Optional[float] = Query(None, description="Minimum fit score"),
+    for_current_resume: bool = Query(
+        True, description="Only postings found for the resume in use"
+    ),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=500),
     session: Session = Depends(SessionDep),
 ) -> dict:
     """
     List discovered jobs with optional filtering.
-    
+
     Args:
         platform: Filter by platform
         status: Filter by status (new, reviewing, rejected, applied)
         hard_filter_pass: Filter by hard filter pass/fail
         min_fit_score: Minimum fit score (0-1)
+        for_current_resume: Hide postings found for a previous resume. On by
+            default, because the wire is a working list: postings collected
+            for a resume the user has moved away from cannot be applied to
+            honestly, and leaving them there is what made the wire ambiguous.
+            They are hidden rather than deleted — the register, the audit log
+            and any application already sent still refer to them.
         skip: Skip this many results
         limit: Return this many results
-    
+
     Returns:
         Jobs and total count
     """
+    from job_agent.services.resume_sync import active_master
+
     query = session.query(Job)
+
+    master = active_master(session) if for_current_resume else None
+    filtered_to_resume = False
+
+    if master:
+        query = query.filter(Job.matched_master_id == master.id)
+        filtered_to_resume = True
     
     # Apply filters
     if platform:
@@ -285,23 +303,45 @@ async def list_jobs(
         .distinct()
     } if job_ids else set()
 
-    applications = {
-        application.job_id: application
-        for application in session.query(Application)
-        .filter(Application.job_id.in_(job_ids))
-        .all()
-    } if job_ids else {}
+    # A posting can have more than one application against it — the user
+    # discards one and the job comes round again. The live one is the one the
+    # wire should show; a discarded one must not stand in for it, or the row
+    # offers to open something the tray no longer holds.
+    ABANDONED = (
+        ApplicationStatus.REJECTED,
+        ApplicationStatus.WITHDRAWN,
+    )
+
+    applications: dict = {}
+
+    if job_ids:
+        for application in (
+            session.query(Application)
+            .filter(Application.job_id.in_(job_ids))
+            .order_by(Application.id)
+            .all()
+        ):
+            current = applications.get(application.job_id)
+
+            if current is None or current.submission_status in ABANDONED:
+                applications[application.job_id] = application
 
     def _stage(job) -> dict:
         application = applications.get(job.id)
 
-        if application is not None:
+        if application is not None and application.submission_status not in ABANDONED:
             status = (
                 application.submission_status.value
                 if hasattr(application.submission_status, "value")
                 else application.submission_status
             )
             return {"stage": status, "application_id": application.id}
+
+        # Discarded is a stage of its own, and one the user can act on: the
+        # row must offer to prepare the posting again rather than a dead link
+        # into a tray that does not hold it.
+        if application is not None:
+            return {"stage": "discarded", "application_id": None}
 
         if job.id in documented:
             return {"stage": "documents_ready", "application_id": None}
@@ -311,6 +351,12 @@ async def list_jobs(
     return {
         "total": total,
         "returned": len(jobs),
+        # What the caller is looking at, so the wire can say "nothing here
+        # yet for this resume" rather than "no jobs found", which reads as a
+        # broken agent.
+        "filtered_to_resume": filtered_to_resume,
+        "resume_in_use": master.name if master else None,
+        "resume_in_use_id": master.id if master else None,
         "jobs": [
             {
                 "id": j.id,
@@ -481,14 +527,29 @@ async def prepare_application(
         HTTPException: If the job, its platform, or its documents are missing
     """
     from job_agent.core.orchestrator import PlatformOutcome, RunOrchestrator
-    from job_agent.models.database import Application, PlatformAccount
+    from job_agent.models.database import Application
 
     job = session.query(Job).filter(Job.id == job_id).first()
 
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
-    existing = session.query(Application).filter(Application.job_id == job_id).first()
+    # Only a *live* application blocks a second one. Refusing because the user
+    # once discarded this posting made "Prepare" on the wire a button that
+    # could only fail: the row said the job was untouched, the tray did not
+    # hold it, and the only way back was to find the discarded record.
+    # Discarding is how a user says "not this one, not yet" — it must not also
+    # mean "never again".
+    existing = (
+        session.query(Application)
+        .filter(
+            Application.job_id == job_id,
+            Application.submission_status.notin_(
+                [ApplicationStatus.REJECTED, ApplicationStatus.WITHDRAWN]
+            ),
+        )
+        .first()
+    )
 
     if existing:
         raise HTTPException(
