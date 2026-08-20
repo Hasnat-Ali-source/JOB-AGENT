@@ -270,6 +270,21 @@ function BlankDetail({ id, onChanged, toast }) {
     }
   };
 
+  // When the agent stops on a question it will not answer, the user carries on
+  // in the open window. Those answers were invisible here — the tray kept
+  // asking, and the agent kept not remembering, because nothing ever read them
+  // back off the page the user had just filled in.
+  const readMyAnswers = async () => {
+    const result = await api.readMyAnswers(id, keepSensitive);
+    detail.reload();
+    onChanged();
+
+    const carried = result?.carried_to_other_applications;
+    if (carried?.message) toast(carried.message, "olive");
+
+    return result?.message || "Read your answers from the window";
+  };
+
   const act = async (fn, successMessage, tone = "olive") => {
     setBusy(true);
     try {
@@ -532,6 +547,15 @@ function BlankDetail({ id, onChanged, toast }) {
           onClick={() => act(saveAnswers, () => "Answers recorded")}
         >
           Save answers
+        </button>
+
+        <button
+          className="btn btn--sm"
+          disabled={busy}
+          onClick={() => act(readMyAnswers, (message) => message)}
+          title="Read the answers you typed into the open browser window, and keep them for the next form that asks"
+        >
+          Read my answers from the window
         </button>
 
         <span className="spacer" />

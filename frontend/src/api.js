@@ -142,6 +142,11 @@ export const api = {
   // Review queue — the product's centre of gravity
   queue: (status = "queued_for_review") => request("/review", { query: { status } }),
   review: (id) => request(`/review/${id}`),
+  readMyAnswers: (id, rememberSensitive = false) =>
+    request(`/review/${id}/read-my-answers`, {
+      method: "POST",
+      query: { remember_sensitive: rememberSensitive },
+    }),
   answer: (id, answers, remember = true, rememberSensitive = false) =>
     request(`/review/${id}/answers`, {
       method: "POST",

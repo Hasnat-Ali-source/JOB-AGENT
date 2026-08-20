@@ -740,6 +740,205 @@ def _reattach_uploads(application: Application, resume, cover) -> None:
     application.deferred_fields = deferred
 
 
+# Reading answers back off the page the user filled in themselves. Targeted at
+# the questions this application is actually waiting on, rather than scraping
+# whatever pairs of text the page happens to hold: a summary page carries the
+# posting's own headings and the board's boilerplate, and inventing answers out
+# of those would put words in the user's mouth.
+_READ_ANSWERS_JS = r"""
+(questions) => {
+    const norm = (t) => (t || '')
+        .replace(/\s+/g, ' ')
+        .replace(/\*/g, '')
+        .trim()
+        .toLowerCase();
+
+    const blocks = [...document.querySelectorAll(
+        'div, p, span, dt, dd, label, legend, li, h1, h2, h3, h4'
+    )];
+    const answers = {};
+
+    for (const question of questions) {
+        const want = norm(question);
+        if (!want || want.length < 8) continue;
+
+        // The smallest element that says the question, so the match is the
+        // label itself rather than the panel containing half the form.
+        let label = null;
+        for (const el of blocks) {
+            const text = norm(el.innerText);
+            if (!text) continue;
+            if (text === want || text.startsWith(want)) {
+                if (!label || el.innerText.length < label.innerText.length) {
+                    label = el;
+                }
+            }
+        }
+        if (!label) continue;
+
+        const whole = (label.innerText || '').replace(/\s+/g, ' ').trim();
+        let answer = '';
+
+        // Either the label element carries the answer after the question...
+        if (norm(whole) !== want) {
+            answer = whole.slice(question.replace(/\s+/g, ' ').trim().length).trim();
+        }
+
+        // ...or the answer is the next block after it.
+        let sibling = label.nextElementSibling;
+        while (!answer && sibling) {
+            answer = (sibling.innerText || '').replace(/\s+/g, ' ').trim();
+            sibling = sibling.nextElementSibling;
+        }
+
+        answer = answer.replace(/^[:\-–—]\s*/, '').trim();
+
+        if (answer && answer.length <= 300 && norm(answer) !== want) {
+            answers[question] = answer;
+        }
+    }
+
+    return answers;
+}
+"""
+
+
+@router.post("/{application_id}/read-my-answers")
+async def read_my_answers(
+    application_id: int,
+    remember_sensitive: bool = Query(False),
+    session: Session = Depends(SessionDep),
+) -> dict:
+    """
+    Learn the answers the user typed into the open form themselves.
+
+    The tray remembers what the user answers *in the tray*. It had no way to
+    learn what they answered in the browser window — and carrying on by hand
+    is exactly what they do when the agent stops on a question it will not
+    answer. Those answers were lost every time, so the next form asked again,
+    and the agent looked as though it never remembered anything.
+
+    Only the questions this application is waiting on are read, and only from
+    the page already open — nothing is typed, clicked or submitted here.
+
+    Args:
+        application_id: Application ID
+        remember_sensitive: Also keep answers to sensitive questions. Off by
+            default, exactly as when answering in the tray.
+
+    Returns:
+        What was read and what was kept
+
+    Raises:
+        HTTPException: If there is no open window to read
+    """
+    application = _get_application(session, application_id)
+    job = session.query(Job).filter(Job.id == application.job_id).first()
+
+    if not job:
+        raise HTTPException(status_code=404, detail="This application has no job")
+
+    deferred = dict(application.deferred_fields or {})
+    outstanding = [
+        question
+        for question, detail in deferred.items()
+        if not detail.get("value_entered_by_user")
+    ]
+
+    if not outstanding:
+        return {
+            "read": 0,
+            "remembered": 0,
+            "answers": {},
+            "message": "Nothing on this application is waiting on an answer.",
+        }
+
+    session_manager = await get_session_manager()
+    page = await session_manager.get_page(job.platform, needs_signin=False)
+
+    if not page:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"No open {job.platform} window to read. Open the application "
+                f"and answer it there, then try this again."
+            ),
+        )
+
+    try:
+        found = await page.evaluate(_READ_ANSWERS_JS, outstanding)
+    except Exception as e:
+        logger.warning(f"Could not read answers from the open page: {e}")
+        raise HTTPException(
+            status_code=409,
+            detail=f"The open page could not be read: {e}",
+        )
+
+    found = {q: a for q, a in (found or {}).items() if q in deferred}
+
+    if not found:
+        return {
+            "read": 0,
+            "remembered": 0,
+            "answers": {},
+            "message": (
+                "Nothing on the open page matched the questions this "
+                "application is waiting on."
+            ),
+        }
+
+    profile = (
+        session.query(CandidateProfile)
+        .filter(CandidateProfile.id == application.candidate_profile_id)
+        .first()
+        if application.candidate_profile_id
+        else None
+    )
+    remembered = dict(profile.remembered_answers or {}) if profile else {}
+    kept = 0
+
+    for question, answer in found.items():
+        deferred[question] = {**deferred[question], "value_entered_by_user": answer}
+
+        is_sensitive = (
+            deferred[question].get("category") == FieldCategory.SENSITIVE.value
+        )
+
+        if profile and (remember_sensitive or not is_sensitive):
+            remembered[FieldClassifier.remember_key(question)] = answer
+            kept += 1
+
+    application.deferred_fields = deferred
+    application.updated_at = utcnow()
+
+    if profile and kept:
+        profile.remembered_answers = remembered
+        profile.updated_at = utcnow()
+
+    carried = carry_answers_forward(
+        session, profile, exclude_application_id=application_id
+    )
+
+    session.commit()
+    session.refresh(application)
+
+    logger.info(
+        f"Read {len(found)} answer(s) off the open form for application "
+        f"{application_id}; kept {kept}"
+    )
+
+    return {
+        "read": len(found),
+        "remembered": kept,
+        "answers": found,
+        "carried_to_other_applications": carried.to_dict() if carried else None,
+        "message": (
+            f"Read {len(found)} answer(s) you gave in the window"
+            + (f" and kept {kept} for future forms." if kept else ".")
+        ),
+    }
+
+
 @router.post("/{application_id}/approve")
 async def approve(
     application_id: int,
