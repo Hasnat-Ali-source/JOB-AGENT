@@ -43,6 +43,10 @@ from job_agent.utils.dates import utcnow
 
 logger = logging.getLogger(__name__)
 
+# A click on a form control. Short: these are controls already on
+# screen, so a slow one means the page is busy, not that it is far.
+CLICK_TIMEOUT_MS = 6000
+
 
 @dataclass
 class FillOutcome:
@@ -186,6 +190,20 @@ class ApplicationFiller:
         classifier = FieldClassifier(profile, dict(profile.remembered_answers or {}))
 
         for form_field in fields:
+            # A choice the form arrives with already made is answered. Asking
+            # the user to answer it again is asking them to confirm a default
+            # they never saw — and on Indeed's resume step, which opens with
+            # their resume selected, it was the first thing the tray demanded
+            # of them on an application that needed nothing.
+            if form_field.answered and form_field.options:
+                outcome.filled_fields[form_field.question] = {
+                    "value": form_field.current,
+                    "selector": form_field.selector,
+                    "category": FieldCategory.KNOWN.value,
+                    "reason": "already answered on the form",
+                }
+                continue
+
             classification = classifier.classify(form_field)
 
             # Document uploads resolve against the generated package
@@ -353,11 +371,19 @@ class ApplicationFiller:
 
                 if form_field.tag == "select":
                     await locator.select_option(label=matched)
+                elif form_field.field_type == "radio":
+                    if not await self._choose_radio(page, form_field, matched):
+                        self._defer(
+                            outcome, form_field, FieldCategory.UNKNOWN,
+                            f"Could not select '{matched}' on this question",
+                        )
+                        return False
                 else:
                     await locator.fill(matched)
 
             elif form_field.field_type in ("checkbox", "radio"):
-                # A yes/no answer to a checkbox is still the user's call
+                # A choice with no options read from the page is one the agent
+                # cannot name, so it cannot know which control to press.
                 self._defer(
                     outcome, form_field, FieldCategory.UNKNOWN,
                     "Multiple-choice answers are left for you to select",
@@ -378,6 +404,85 @@ class ApplicationFiller:
                 "The agent could not fill this field automatically",
             )
             return False
+
+    @staticmethod
+    async def _choose_radio(page: Any, form_field: FormField, choice: str) -> bool:
+        """
+        Select one option of a radio group by the label the user reads.
+
+        A radio is checked, not filled — `fill()` on one raises "Input of type
+        radio cannot be filled", which is how an answer the user had given for
+        a required question was reported as unanswerable. And the option is
+        found by its *label*: Indeed's "No" radio carries `value="N"`, so
+        matching on the value picks nothing.
+
+        Args:
+            page: Playwright page
+            form_field: The radio group, whose selector names its first option
+            choice: The option label to select
+
+        Returns:
+            True if an option was checked
+        """
+        group = (
+            f'input[type="radio"][name="{form_field.name}"]'
+            if form_field.name
+            else form_field.selector
+        )
+
+        try:
+            radios = await page.locator(group).all()
+        except Exception:
+            radios = []
+
+        wanted = choice.strip().casefold()
+
+        for radio in radios:
+            label = ""
+            try:
+                radio_id = await radio.get_attribute("id")
+                if radio_id:
+                    label = await page.locator(
+                        f'label[for="{radio_id}"]'
+                    ).first.inner_text(timeout=1000)
+            except Exception:
+                label = ""
+
+            if not label:
+                try:
+                    label = await radio.get_attribute("value") or ""
+                except Exception:
+                    label = ""
+
+            label = label.strip()
+
+            # Exact first, then containment: a card-style option renders its
+            # label with extra description around the words the user chose.
+            if label.casefold() != wanted and wanted not in label.casefold():
+                continue
+
+            # The label is what a person clicks, and on these forms it is the
+            # only part with a size: the input is collapsed to nothing behind
+            # it, so clicking the input — even forced — lands on no pixels and
+            # the option is never selected.
+            if radio_id:
+                try:
+                    label_el = page.locator(f'label[for="{radio_id}"]').first
+
+                    if await label_el.is_visible():
+                        await label_el.click(timeout=CLICK_TIMEOUT_MS)
+                        return True
+                except Exception as e:
+                    logger.debug(f"Label click for '{choice}' did not land: {e}")
+
+            try:
+                await radio.check(force=True)
+                return True
+            except Exception as e:
+                logger.warning(f"Could not check radio '{choice}': {e}")
+                return False
+
+        return False
 
     async def _attach_file(
         self,
