@@ -9,7 +9,9 @@ No credentials are stored — only Keychain metadata (platform, timestamp, profi
 Playwright handles the actual browser session.
 """
 
+import asyncio
 import logging
+import subprocess
 from pathlib import Path
 from typing import Optional, Dict
 import shutil
@@ -33,6 +35,16 @@ DESKTOP_USER_AGENT = (
 )
 
 
+# Chromium writes the port it is listening on into the profile directory when
+# started with --remote-debugging-port. It is how a later process finds a
+# browser it did not start.
+DEVTOOLS_PORT_FILE = "DevToolsActivePort"
+
+# How long to wait for a browser we just spawned to start listening.
+BROWSER_START_TIMEOUT_S = 20.0
+BROWSER_START_POLL_S = 0.5
+
+
 class SessionManager:
     """
     Manages persistent browser contexts per platform.
@@ -52,6 +64,9 @@ class SessionManager:
         # A persistent context is its own browser, so there is nothing else
         # to track: closing the context closes the window.
         self.contexts: Dict[str, BrowserContext] = {}
+        # Browsers this process connected to rather than launched. They belong
+        # to nobody: shutting down here must leave them running.
+        self.adopted: Dict[str, object] = {}
         self.playwright_instance = None
     
     @property
@@ -75,8 +90,19 @@ class SessionManager:
     
     async def stop_playwright(self):
         """Stop Playwright instance and close all contexts (call at app shutdown)."""
-        # Close all open contexts
+        # Close all open contexts — except the ones this process merely
+        # connected to. A window the user is working in must survive the
+        # dashboard restarting: closing it here is what threw away a
+        # half-finished application, and the answers typed into it, every time
+        # the server came back up.
         for platform, context in self.contexts.items():
+            if platform in self.adopted:
+                logger.info(
+                    f"Leaving {platform}'s browser running — this process did "
+                    f"not start it"
+                )
+                continue
+
             try:
                 await context.close()
                 logger.info(f"Closed context for {platform}")
@@ -84,6 +110,7 @@ class SessionManager:
                 logger.error(f"Error closing context for {platform}: {e}")
 
         self.contexts.clear()
+        self.adopted.clear()
 
         # Stop Playwright
         if self.playwright_instance:
@@ -149,6 +176,25 @@ class SessionManager:
 
         profile_dir = self.get_profile_dir(platform)
 
+        # A window the user will work in outlives this process. Started as its
+        # own browser and reached over the debugging port, it survives the
+        # dashboard restarting — so a restart reconnects to the application
+        # the user is halfway through instead of closing it on them.
+        #
+        # Headless runs stay owned: nothing is watching them, there is no work
+        # in progress to lose, and a stray browser nobody closes is worse.
+        if not headless:
+            context = await self._adopt_or_spawn(platform, profile_dir)
+
+            if context is not None:
+                self.contexts[platform] = context
+                return context
+
+            logger.warning(
+                f"Could not start a standalone browser for {platform}; "
+                f"falling back to one this process owns"
+            )
+
         try:
             # A persistent context IS the browser — there is no separate
             # Browser object to track, and closing the context closes it.
@@ -168,7 +214,19 @@ class SessionManager:
                 # put up a CAPTCHA, the connector still stops and hands it to
                 # the user rather than trying to get past it.
                 user_agent=DESKTOP_USER_AGENT,
-                viewport={"width": 1440, "height": 900},
+                # A window the user has to work in must be the size of their
+                # window, not a number chosen here. With a fixed viewport the
+                # page stays 1440x900 however large the window is opened, so a
+                # tall overlay is simply cut off — a reCAPTCHA image challenge
+                # rendered with its Verify button below the fold, and the user
+                # could neither scroll to it nor resize their way out. Headless
+                # runs keep a defined size, because there is no window to take
+                # one from.
+                **(
+                    {"viewport": {"width": 1440, "height": 900}}
+                    if headless
+                    else {"no_viewport": True}
+                ),
                 locale="en-US",
                 extra_http_headers={
                     "Accept-Language": "en-US,en;q=0.9",
@@ -177,7 +235,7 @@ class SessionManager:
                     # Removes the navigator.webdriver flag that marks the
                     # browser as automated. Same reasoning as the user agent.
                     "--disable-blink-features=AutomationControlled",
-                ],
+                ] + ([] if headless else ["--start-maximized"]),
                 # Playwright's bundled Chromium, deliberately not the user's
                 # installed Chrome. Chrome refuses to open a second instance
                 # against a profile while the user's own window is running —
@@ -204,6 +262,148 @@ class SessionManager:
             logger.error(f"Failed to launch browser for {platform}: {e}")
             raise
     
+    async def _adopt_or_spawn(
+        self,
+        platform: str,
+        profile_dir: Path,
+    ) -> Optional[BrowserContext]:
+        """
+        Reach the platform's standalone browser, starting one if need be.
+
+        Args:
+            platform: Platform name
+            profile_dir: Its profile directory
+
+        Returns:
+            The browser's context, or None if one could not be reached
+        """
+        context = await self._connect_to_running(platform, profile_dir)
+
+        if context is not None:
+            logger.info(f"Adopted the browser already running for {platform}")
+            return context
+
+        if not self._spawn_browser(profile_dir):
+            return None
+
+        waited = 0.0
+
+        while waited < BROWSER_START_TIMEOUT_S:
+            await asyncio.sleep(BROWSER_START_POLL_S)
+            waited += BROWSER_START_POLL_S
+
+            context = await self._connect_to_running(platform, profile_dir)
+
+            if context is not None:
+                logger.info(f"Started a standalone browser for {platform}")
+                return context
+
+        return None
+
+    async def _connect_to_running(
+        self,
+        platform: str,
+        profile_dir: Path,
+    ) -> Optional[BrowserContext]:
+        """
+        Connect to a browser already running on this profile, if there is one.
+
+        Args:
+            platform: Platform name
+            profile_dir: Its profile directory
+
+        Returns:
+            Its context, or None when nothing is listening
+        """
+        port_file = profile_dir / DEVTOOLS_PORT_FILE
+
+        if not port_file.exists():
+            return None
+
+        try:
+            port = int(port_file.read_text().splitlines()[0].strip())
+        except Exception:
+            # Left behind by a browser that has since exited.
+            return None
+
+        try:
+            browser = await self.playwright_instance.chromium.connect_over_cdp(
+                f"http://127.0.0.1:{port}", timeout=5000
+            )
+        except Exception as e:
+            logger.debug(f"Nothing answering on port {port} for {platform}: {e}")
+            return None
+
+        context = (
+            browser.contexts[0] if browser.contexts else await browser.new_context()
+        )
+
+        if not context.pages:
+            await context.new_page()
+
+        self.adopted[platform] = browser
+
+        return context
+
+    def _spawn_browser(self, profile_dir: Path) -> bool:
+        """
+        Start a browser on this profile as its own process.
+
+        Detached deliberately (`start_new_session`): a child of the dashboard
+        would be taken down with it, which is the whole thing this avoids.
+
+        Args:
+            profile_dir: The profile to open
+
+        Returns:
+            True if the process was started
+        """
+        # A port file from a browser that has since exited would send the next
+        # connection attempt at a dead port for as long as it sits there.
+        stale = profile_dir / DEVTOOLS_PORT_FILE
+        stale.unlink(missing_ok=True)
+
+        try:
+            executable = self.playwright_instance.chromium.executable_path
+        except Exception as e:
+            logger.error(f"No browser executable available: {e}")
+            return False
+
+        try:
+            subprocess.Popen(
+                [
+                    executable,
+                    f"--user-data-dir={profile_dir}",
+                    # Port 0: Chromium picks a free one and writes it into the
+                    # profile, so two platforms never collide.
+                    "--remote-debugging-port=0",
+                    f"--user-agent={DESKTOP_USER_AGENT}",
+                    "--lang=en-US",
+                    "--accept-lang=en-US,en;q=0.9",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-blink-features=AutomationControlled",
+                    "--start-maximized",
+                    # Playwright launches with these two, and cookies are
+                    # encrypted with whichever store was in use when they were
+                    # written. Spawning without them opens the same profile
+                    # against the real macOS Keychain, cannot decrypt a single
+                    # cookie Playwright saved, and every connected platform
+                    # comes back signed out.
+                    "--password-store=basic",
+                    "--use-mock-keychain",
+                    "about:blank",
+                ],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            return True
+        except Exception as e:
+            logger.error(f"Could not start a browser on {profile_dir}: {e}")
+            return False
+
     @staticmethod
     async def _is_alive(context: BrowserContext) -> bool:
         """
@@ -426,8 +626,21 @@ class SessionManager:
             True if successful, False otherwise
         """
         try:
-            # Close browser context
-            if platform in self.contexts:
+            # Close browser context. Disconnecting is the one case where a
+            # standalone browser *is* closed: its profile is about to be
+            # deleted underneath it, and leaving it running would leave a
+            # window signed into an account the user just disconnected.
+            browser = self.adopted.pop(platform, None)
+
+            if browser is not None:
+                try:
+                    await browser.close()
+                    logger.info(f"Closed the standalone browser for {platform}")
+                except Exception as e:
+                    logger.error(f"Error closing browser for {platform}: {e}")
+
+                self.contexts.pop(platform, None)
+            elif platform in self.contexts:
                 try:
                     await self.contexts[platform].close()
                     del self.contexts[platform]
