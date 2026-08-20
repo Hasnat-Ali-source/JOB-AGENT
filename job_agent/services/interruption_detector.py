@@ -36,16 +36,27 @@ class InterruptionKind(str, Enum):
     BLOCKED = "blocked"
 
 
+# How big a challenge widget is. A reCAPTCHA badge is 256x60 and a real
+# challenge is 300x150 or larger, so this separates them on the short side.
+MIN_CHALLENGE_SIZE = 100
+
 # Selectors that are near-conclusive on their own
 STRUCTURAL_SIGNALS = {
     InterruptionKind.CAPTCHA: [
-        "iframe[src*='recaptcha']",
-        "iframe[src*='hcaptcha']",
-        "iframe[title*='captcha' i]",
+        # The *challenge* frame, never the badge. An ATS embeds an invisible
+        # reCAPTCHA on every application form, whose badge is a 256x60 iframe
+        # in the corner of a page with no challenge on it at all. Matching
+        # `iframe[src*='recaptcha']` therefore fired on every form the agent
+        # ever opened: every interruption on this install — Greenhouse,
+        # Remote, SimplyHired — was that badge, and each one paused the
+        # station and queued nothing. `/anchor` is the badge; `/bframe` is the
+        # challenge.
+        "iframe[src*='recaptcha'][src*='bframe']",
+        "iframe[src*='hcaptcha'][src*='challenge']",
         "div.g-recaptcha",
         "div.h-captcha",
         "#px-captcha",
-        "[data-testid*='captcha' i]",
+        "[data-testid='captcha']",
         "form#challenge-form",  # Cloudflare
         # Cloudflare and friends show an interstitial that verifies the browser
         # before any content loads. It is not a puzzle to solve — it resolves
@@ -205,6 +216,14 @@ class InterruptionDetector:
                         if kind == InterruptionKind.SIGNIN_REQUIRED:
                             break
 
+                        # Present is not the same as shown. A challenge the
+                        # user cannot see is one they cannot solve, and
+                        # stopping the run for it strands the application.
+                        if kind == InterruptionKind.CAPTCHA and not (
+                            await InterruptionDetector._is_shown(page, selector)
+                        ):
+                            continue
+
                         return InterruptionDetector._build(kind, url, f"matched {selector}")
                 except Exception as e:
                     logger.debug(f"Interruption selector {selector} unusable: {e}")
@@ -216,6 +235,76 @@ class InterruptionDetector:
             return None
 
         lowered = " ".join(text.split())[:5000].lower()
+
+        for kind, patterns in TEXT_SIGNALS.items():
+            for pattern in patterns:
+                match = re.search(pattern, lowered)
+                if match:
+                    snippet = lowered[max(0, match.start() - 40):match.start() + 120]
+                    return InterruptionDetector._build(kind, url, snippet.strip())
+
+        return None
+
+    @staticmethod
+    async def _is_shown(page: Any, selector: str) -> bool:
+        """
+        Whether a matched challenge is actually on screen at a usable size.
+
+        Args:
+            page: Playwright page
+            selector: The selector that matched
+
+        Returns:
+            True when at least one match is visible and big enough to be a
+            challenge. True as well when the page cannot answer — a detector
+            that cannot see must not wave a wall through unnoticed.
+        """
+        try:
+            elements = await page.locator(selector).all()
+        except Exception:
+            return True
+
+        seen = False
+
+        for element in elements:
+            try:
+                if not await element.is_visible():
+                    continue
+
+                box = await element.bounding_box()
+            except Exception:
+                return True
+
+            seen = True
+
+            if box and box.get("width", 0) >= MIN_CHALLENGE_SIZE and box.get(
+                "height", 0
+            ) >= MIN_CHALLENGE_SIZE:
+                return True
+
+        # Nothing visible, or everything visible was badge-sized.
+        return not seen and False
+
+    @staticmethod
+    def from_text(text: str, url: str = "") -> Optional[Interruption]:
+        """
+        Detect a wall from wording alone, ignoring structural signals.
+
+        For callers that already know the page's markup is not evidence. The
+        apply route is one: an ATS embeds an invisible reCAPTCHA on every
+        form, so `iframe[src*='recaptcha']` is present on pages carrying no
+        challenge at all, and treating it as one would stop the walk on a
+        perfectly ordinary application. Wording does not have that problem —
+        a page only says "Additional Verification Required" when it means it.
+
+        Args:
+            text: Visible page text
+            url: Where the text came from, for the record
+
+        Returns:
+            An Interruption, or None
+        """
+        lowered = " ".join((text or "").split())[:5000].lower()
 
         for kind, patterns in TEXT_SIGNALS.items():
             for pattern in patterns:
