@@ -643,8 +643,19 @@ class RunOrchestrator:
             try:
                 documents = self._documents_for(job)
 
-                if not documents.get("resume"):
+                # A station that applies from the board's own profile has no
+                # tailored documents by design — SimplyHired carries the user's
+                # Indeed resume, and writing one to attach would be work
+                # nothing consumes. Requiring one here skipped every job on
+                # such a station, queued nothing, and recorded no reason for
+                # it: the tray stayed empty and "Prepare" reported "the form
+                # could not be filled: no reason reported".
+                if not documents.get("resume") and not platform_supplies_documents:
                     logger.info(f"No tailored resume for job {job.id}; skipping")
+                    outcome.errors.append(
+                        f"{job.title}: no tailored resume was written for this "
+                        f"posting, so there was nothing to attach"
+                    )
                     continue
 
                 posting = self._posting_for(job)
