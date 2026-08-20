@@ -97,7 +97,13 @@ EXPIRED = re.compile(
     r"|this (job|posting|position) (has been|was) (removed|closed|filled)"
     r"|applications are closed|we are no longer accepting"
     r"|perform a new search to find current jobs"
-    r"|this posting has closed",
+    r"|this posting has closed"
+    # SimplyHired's own wording for a posting that is gone. It says
+    # "temporarily", but the page it serves has no apply control at all, so to
+    # a walk it is indistinguishable from expired — and reporting "no way to
+    # apply was offered" for it reads as a broken agent rather than a closed
+    # job.
+    r"|this (job )?(posting|listing|position) is (temporarily |currently )?unavailable",
     re.IGNORECASE,
 )
 
@@ -137,6 +143,7 @@ class RouteResult:
     found_form: bool = False
     found_submit: str = ""
     expired: bool = False
+    interruption: Any = None
     reason: str = ""
 
     @property
@@ -171,6 +178,7 @@ class RouteResult:
             "found_submit": self.found_submit,
             "reached_an_application": self.reached_an_application,
             "expired": self.expired,
+            "interruption": self.interruption.to_dict() if self.interruption else None,
             "reason": self.reason,
             "message": self.describe(),
         }
@@ -248,6 +256,19 @@ class ApplyRouteFinder:
             route = await self._next_route(page)
 
             if not route:
+                # Before blaming the page for offering no way to apply, ask
+                # whether it was allowed to show one. Cloudflare answers an
+                # apply link with "Additional Verification Required" and a Ray
+                # ID, which has nothing to do with the posting — and telling
+                # the user their agent found no apply button sends them to
+                # look for a fault that is not there.
+                wall = await self._wall(page)
+
+                if wall:
+                    result.interruption = wall
+                    result.reason = f"{wall.evidence.strip()} — {wall.guidance}"
+                    break
+
                 result.reason = (
                     "no way to apply was offered on this page. The board may "
                     "keep its apply flow behind a sign-in — connect this "
@@ -345,6 +366,29 @@ class ApplyRouteFinder:
 
         return bool(EXPIRED.search(text or ""))
 
+    async def _wall(self, page: Any):
+        """
+        Whether this page is a verification wall rather than a dead end.
+
+        Wording only — see `InterruptionDetector.from_text`. An ATS embeds an
+        invisible reCAPTCHA on every application form, so its markup is not
+        evidence of a challenge.
+
+        Args:
+            page: Playwright page
+
+        Returns:
+            An Interruption, or None
+        """
+        from job_agent.services.interruption_detector import InterruptionDetector
+
+        try:
+            text = await page.inner_text("body", timeout=POPUP_TIMEOUT_MS)
+        except Exception:
+            return None
+
+        return InterruptionDetector.from_text(text or "", getattr(page, "url", ""))
+
     async def _has_applicant_fields(self, page: Any) -> bool:
         """
         Whether this page asks for an applicant.
@@ -388,6 +432,16 @@ class ApplyRouteFinder:
         """
         Whether this page is a step of an application, rather than a landing.
 
+        A control counts when *the user can see it*, which is not the same as
+        the input element having a size. SmartApply's first step for most
+        postings is "Add a resume": one radio group, styled the way modern
+        forms style radios — the `input` itself is collapsed to nothing and
+        the thing on screen is its label. Requiring the input to have a
+        bounding box found no fields there, so the step read as a dead end and
+        the walk reported "no way to apply was offered" while standing on the
+        application. That single miss accounted for most of the postings the
+        route was thought to be failing to reach.
+
         Args:
             page: Playwright page
 
@@ -399,12 +453,20 @@ class ApplyRouteFinder:
                 await page.evaluate(
                     """() => {
                         const vis = e => {
+                            if (!e) return false;
                             const b = e.getBoundingClientRect();
                             return b.width > 0 && b.height > 0;
                         };
+                        // A visually-hidden input whose label is on screen is
+                        // a field the user can see and click.
+                        const shown = e => vis(e)
+                            || (e.labels && [...e.labels].some(vis))
+                            || vis(e.closest('label'))
+                            || (e.id && vis(document.querySelector(
+                                `label[for="${CSS.escape(e.id)}"]`)));
                         const fields = [...document.querySelectorAll(
                             'input:not([type=hidden]):not([type=submit]),select,textarea'
-                        )].filter(vis);
+                        )].filter(shown);
 
                         if (!fields.length) return false;
 

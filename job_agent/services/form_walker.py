@@ -47,6 +47,14 @@ MAX_STEPS = 12
 SETTLE_MS = 1800
 CLICK_TIMEOUT_MS = 6000
 
+# How long a step is given to render before the walk reads it, and how often
+# it is asked. Generous because the ceiling is only reached by a step that
+# never arrives: a step that renders in two seconds costs two seconds.
+# Measured against SmartApply, whose demographic step spins for over
+# twenty-five seconds before its questions exist.
+STEP_RENDER_MAX_MS = 45000
+STEP_RENDER_POLL_MS = 1000
+
 # Controls that carry on to the next step. Ordered: the more specific the
 # wording, the more certain it is a forward control rather than something else
 # that happens to be a button.
@@ -56,6 +64,12 @@ NEXT_PATTERNS = (
     r"^\s*(save (and|&) )?next\s*$",
     r"^\s*continue to .{0,30}$",
     r"^\s*proceed\s*$",
+    # The last step of an Indeed application does not say Continue: it says
+    # "Review your application", and the walk stopped one press short of the
+    # review page reporting that it could find neither a next step nor a
+    # submit control. It is a forward control, not a submit — the review page
+    # it opens is where Submit lives.
+    r"^\s*review( your)?( application)?\s*$",
     r"^\s*(go )?forward\s*$",
 )
 
@@ -63,7 +77,13 @@ NEXT_PATTERNS = (
 # knows it has reached the end, and so it can tell the user what the last
 # control says.
 SUBMIT_PATTERNS = (
-    r"^\s*submit( application| my application)?\s*$",
+    # "your" is not decoration: Indeed's SmartApply review page labels its
+    # final control "Submit your application", and without this the walker
+    # reached the last step of a complete application and reported that it
+    # could find no submit control — while the route finder, whose pattern
+    # did allow it, was naming the very same button.
+    r"^\s*submit( your| my)? application\s*$",
+    r"^\s*submit\s*$",
     r"^\s*(send|finish|complete)( application)?\s*$",
     r"^\s*apply( now)?\s*$",
     r"^\s*i'?m done\s*$",
@@ -404,6 +424,12 @@ class FormWalker:
         Never pressed. Found so the walk knows it is at the end, and so the
         tray can tell the user which button they are about to authorise.
 
+        A disabled one still counts. Indeed's review page renders its Submit
+        disabled for a few seconds while it finishes preparing, and a walk that
+        only looked at enabled controls reported "no submit control found" on a
+        complete application sitting at 100% — sending the user to look for a
+        button that was in front of them.
+
         Args:
             page: Playwright page
 
@@ -412,6 +438,28 @@ class FormWalker:
         """
         for label, _ in await self._clickables(page):
             if NEVER_CLICK.search(label):
+                continue
+
+            if any(re.match(pattern, label, re.IGNORECASE) for pattern in SUBMIT_PATTERNS):
+                return label.strip()
+
+        try:
+            handles = await page.locator(
+                "button:disabled, input[type=submit]:disabled, [role=button][disabled]"
+            ).all()
+        except Exception:
+            return None
+
+        for handle in handles:
+            try:
+                if not await handle.is_visible():
+                    continue
+
+                label = " ".join(((await handle.inner_text()) or "").split())
+            except Exception:
+                continue
+
+            if not label or NEVER_CLICK.search(label):
                 continue
 
             if any(re.match(pattern, label, re.IGNORECASE) for pattern in SUBMIT_PATTERNS):
@@ -475,6 +523,10 @@ class FormWalker:
         Returns:
             True if the click landed
         """
+        # What the step looks like before the click, so the wait afterwards can
+        # tell the next step from the one still on screen.
+        before = await self._fingerprint(page)
+
         try:
             await locator.click(timeout=CLICK_TIMEOUT_MS)
         except Exception as e:
@@ -488,9 +540,72 @@ class FormWalker:
         except Exception:
             pass
 
+        await self._await_step(page, before)
+
+        return True
+
+    async def _await_step(self, page: Any, before: str = "") -> None:
+        """
+        Wait until the next step has actually rendered.
+
+        Goal-directed, not a fixed pause. SmartApply's demographic step paints
+        its heading and progress bar for the better part of a minute before its
+        questions exist, and a walk that read it on a timer found a step with
+        no fields and no way forward — and reported a filled application as
+        having stopped for no reason. Polls for the thing it is waiting for: a
+        field to answer, or a control to press.
+
+        Arrival is judged against the *previous* step, because for a beat after
+        the click the step just left is still on screen. Without that
+        comparison the wait ends immediately on the outgoing step's own
+        Continue button, which is the same as not waiting at all.
+
+        Args:
+            page: Playwright page
+            before: The previous step's fingerprint
+        """
+        deadline = STEP_RENDER_MAX_MS
+
+        while deadline > 0:
+            try:
+                ready = await page.evaluate(
+                    """() => {
+                        const vis = e => {
+                            const b = e.getBoundingClientRect();
+                            return b.width > 0 && b.height > 0;
+                        };
+                        const fields = [...document.querySelectorAll(
+                            'input:not([type=hidden]):not([type=submit]),select,textarea'
+                        )].some(e => vis(e) || (e.labels && [...e.labels].some(vis)));
+                        if (fields) return true;
+                        return [...document.querySelectorAll('button,[role=button]')]
+                            .filter(vis)
+                            .some(e => /continue|next|submit|apply|review|finish/i
+                                .test((e.innerText || '').trim()));
+                    }"""
+                )
+            except Exception:
+                # Mid-navigation the context is destroyed. That is the normal
+                # state of a wizard hopping steps, not a reason to give up.
+                ready = False
+
+            if ready and before:
+                # Ready, but is it the *next* step or the one just left?
+                ready = await self._fingerprint(page) != before
+
+            if ready:
+                break
+
+            try:
+                await page.wait_for_timeout(STEP_RENDER_POLL_MS)
+            except Exception:
+                pass
+
+            deadline -= STEP_RENDER_POLL_MS
+
+        # Even once something is on screen, the rest of the step lands a beat
+        # later; reading on the same tick sees half a form.
         try:
             await page.wait_for_timeout(SETTLE_MS)
         except Exception:
             pass
-
-        return True
